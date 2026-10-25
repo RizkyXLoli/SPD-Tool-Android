@@ -1,0 +1,24 @@
+# Gradle
+.gradle/
+build/
+local.properties
+*.log
+
+# Android Studio / IDE
+.idea/
+*.iml
+.DS_Store
+
+# Artefak
+*.apk
+*.aab
+*.keystore
+*.jks
+
+# Firmware / dump — jangan pernah di-commit
+*.pac
+*.ofp
+*.img
+*.bin
+keystore.properties
+*.jks

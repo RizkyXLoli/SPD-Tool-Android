@@ -1,0 +1,58 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Signing rilis dibaca dari keystore.properties (tidak di-commit).
+def ksProps = new Properties()
+def ksFile = rootProject.file('keystore.properties')
+if (ksFile.exists()) {
+    ksFile.withInputStream { ksProps.load(it) }
+}
+
+android {
+    namespace 'com.unisoc.spdflasher'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.unisoc.spdflasher"
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+    }
+
+    signingConfigs {
+        if (ksFile.exists()) {
+            release {
+                storeFile rootProject.file(ksProps['storeFile'])
+                storePassword ksProps['storePassword']
+                keyAlias ksProps['keyAlias']
+                keyPassword ksProps['keyPassword']
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (ksFile.exists()) {
+                signingConfig signingConfigs.release
+            } else {
+                signingConfig signingConfigs.debug
+            }
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}
+
+// Tanpa dependensi eksternal — hanya Android framework.
+dependencies { }
