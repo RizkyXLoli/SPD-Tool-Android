@@ -33,7 +33,7 @@ This document describes how `uflash` works end-to-end: USB enumeration, the BSL 
 
 | PID | Mode |
 |---|---|
-| `0x4d00` | BROM / early BSL |
+| `0x4d00` | mode download / early BSL |
 | `0x5d00` | FDL1 running |
 | `0x3d00` | Variant / engineering |
 
@@ -48,7 +48,7 @@ After opening the device handle, `prepare_handle_for_interface()` runs the follo
 3. **`libusb_set_configuration(1)`** — even when already active, this causes IOKit on macOS to temporarily release any bound interface drivers (e.g. `AppleUSBCDCACMData`), opening a window for `claim_interface` to succeed. Errors are ignored.
 4. **`libusb_claim_interface`** — claims the discovered interface.
 5. **`libusb_set_interface_alt_setting`** — initialises the IOKit interface service on macOS before bulk transfers can be issued.
-6. **`SET_CONTROL_LINE_STATE` (DTR|RTS)** — class control transfer (`bmRequestType=0x21`, `bRequest=34`, `wValue=0x0003`). Unisoc BROMs that enumerate as CDC-ACM require this before the bulk OUT endpoint will accept data. Vendor-class interfaces will NAK or STALL this control transfer; errors are silently ignored.
+6. **`SET_CONTROL_LINE_STATE` (DTR|RTS)** — class control transfer (`bmRequestType=0x21`, `bRequest=34`, `wValue=0x0003`). Unisoc download-mode interfaces that enumerate as CDC-ACM require this before the bulk OUT endpoint will accept data. Vendor-class interfaces will NAK or STALL this control transfer; errors are silently ignored.
 7. **500 ms settle delay** — allows the device time to finish enumeration before the first bulk transfer.
 
 ### Write paths
@@ -162,13 +162,13 @@ A valid response starts with `0xAE`. The host retries every 200 ms until the tim
 
 **Source:** `src/flash_workflow.cpp` — `run_with_connected_device()`, `load_fdl2()`
 
-If the handshake string does not contain `"Spreadtrum"` (i.e. the device is in raw BROM mode), `uflash` loads two bootloader stages before flashing can begin.
+If the handshake string does not contain `"Spreadtrum"` (i.e. the device is in raw download mode), `uflash` loads two bootloader stages before flashing can begin.
 
 ```
-BROM → FDL1 load → FDL1 executes → re-enumerate → FDL2 load → FDL2 executes
+download mode → FDL1 load → FDL1 executes → re-enumerate → FDL2 load → FDL2 executes
 ```
 
-### Stage 1 — FDL1 (BROM download agent)
+### Stage 1 — FDL1 (first-stage download agent)
 
 1. Send `BSL_CMD_CONNECT` and discard the response.
 2. Locate `fdl1` by case-insensitive filename search in the extracted PAC temp directory.

@@ -12,13 +12,13 @@ import java.util.Locale;
 /**
  * Alur kerja flashing Unisoc (setara fungsi inti SPD Upgrade Tool):
  *
- *   BROM -> muat FDL1 -> EXEC -> re-enumerate
+ *   mode download -> muat FDL1 -> EXEC -> re-enumerate
  *        -> muat FDL2 -> EXEC -> ExecNandInit
  *        -> per partisi: START_DATA -> MIDST_DATA x N -> END_DATA
  *        -> NORMAL_RESET
  *
  * Tidak ada operasi bypass/autentikasi yang diakali: perangkat harus berada
- * dalam mode download (BROM/FDL) dan firmware harus cocok dengan perangkat.
+ * dalam mode download (FDL) dan firmware harus cocok dengan perangkat.
  */
 public class FlashEngine {
 
@@ -62,7 +62,7 @@ public class FlashEngine {
         prog(cb, 1, "handshake");
         if (!bsl.handshake(4000)) {
             throw new IOException("Perangkat tidak merespons. Pastikan HP dalam mode "
-                    + "download (BROM) dan kabel OTG terpasang dengan benar.");
+                    + "download dan kabel OTG terpasang dengan benar.");
         }
         log(cb, "Perangkat merespons BSL.");
 
@@ -197,16 +197,16 @@ public class FlashEngine {
             log(cb, "[" + done + "/" + total + "] " + nm + "  " + PacParser.human(e.size));
             prog(cb, basePct, nm);
 
-            byte[] data = PacParser.readEntryData(pac, e);
             boolean named = !e.idName.isEmpty() && (e.type.contains("2") || e.baseAddress <= 0);
             // LENGTH di header BSL hanya 16-bit -> payload wajib <= 65535 byte
             int chunk = e.type.startsWith("CODE2") || e.type.startsWith("YAFFS") ? 16384 : 32768;
 
             final int d = done;
             if (named) {
-                downloadNamed(bsl, e.idName, data, chunk, cb, basePct,
+                downloadNamedStream(bsl, pac, e, chunk, cb, basePct,
                         30 + (int) (65.0 * d / Math.max(1, total)));
             } else {
+                byte[] data = PacParser.readEntryData(pac, e);
                 long addr = e.baseAddress >= 0 ? e.baseAddress : e.addr[0];
                 if (addr <= 0) {
                     log(cb, "  dilewati: alamat tidak diketahui");
@@ -250,6 +250,172 @@ public class FlashEngine {
     }
 
     // =========================================================== transfer
+
+    /** Sumber data streaming untuk satu entri PAC — tidak memuat ke RAM. */
+    private static final class EntrySrc implements java.io.Closeable {
+        final RandomAccessFile raf;
+        final long start;
+        final long size;
+
+        EntrySrc(PacParser.Pac pac, PacParser.Entry e) throws IOException {
+            raf = new RandomAccessFile(pac.file, "r");
+            start = e.dataOffset;
+            size = e.size;
+            if (start < 0 || start + size > raf.length()) {
+                raf.close();
+                throw new IOException("Offset data di luar file untuk " + e.label());
+            }
+        }
+
+        void seek(long off) throws IOException { raf.seek(start + off); }
+
+        int read(byte[] b, int off, int len) throws IOException {
+            return raf.read(b, off, len);
+        }
+
+        @Override public void close() {
+            try { raf.close(); } catch (IOException ignored) { }
+        }
+    }
+
+    /**
+     * Checksum sum32 (kata big-endian, sisa di-pad nol) secara inkremental.
+     * Setara {@link Bsl#sum32} tapi bisa dipakai untuk partisi > 4 GiB.
+     */
+    static final class Sum32 {
+        private long sum = 0;
+        private final byte[] rem = new byte[4];
+        private int remLen = 0;
+
+        void update(byte[] d, int off, int len) {
+            int i = off;
+            int end = off + len;
+            if (remLen > 0) {
+                while (remLen < 4 && i < end) rem[remLen++] = d[i++];
+                if (remLen < 4) return;
+                sum = (sum + word(rem, 0)) & 0xFFFFFFFFL;
+                remLen = 0;
+            }
+            int last = end - 3;
+            for (; i < last; i += 4) sum = (sum + word(d, i)) & 0xFFFFFFFFL;
+            for (; i < end; i++) rem[remLen++] = d[i];
+        }
+
+        private static long word(byte[] d, int i) {
+            return ((d[i] & 0xFFL) << 24) | ((d[i + 1] & 0xFFL) << 16)
+                    | ((d[i + 2] & 0xFFL) << 8) | (d[i + 3] & 0xFFL);
+        }
+
+        long value() {
+            if (remLen > 0) {
+                long w = 0;
+                for (int k = 0; k < 4; k++) {
+                    w = (w << 8) | (k < remLen ? (rem[k] & 0xFFL) : 0);
+                }
+                sum = (sum + w) & 0xFFFFFFFFL;
+                remLen = 0;
+            }
+            return sum;
+        }
+    }
+
+    private static final int COPY_BUF = 1 << 20;
+
+    /**
+     * START_DATA mode DownloadByID.
+     * <= 4 GiB : [NAME:72][SIZE:4 LE][CHECKSUM:4 BE]
+     * >  4 GiB : [NAME:72][SIZE_LO:4 LE][SIZE_HI:4 LE][RESERVED:8]  (tanpa checksum)
+     */
+    private static byte[] namedStart(String name, long size, long checksum) {
+        if (size > 0xFFFFFFFFL) {
+            byte[] p = new byte[72 + 16];
+            System.arraycopy(Bsl.name72(name), 0, p, 0, 72);
+            byte[] lo = Bsl.le32(size & 0xFFFFFFFFL);
+            byte[] hi = Bsl.le32((size >>> 32) & 0xFFFFFFFFL);
+            System.arraycopy(lo, 0, p, 72, 4);
+            System.arraycopy(hi, 0, p, 76, 4);
+            return p;
+        }
+        return concat(Bsl.name72(name), Bsl.le32(size), Bsl.be32(checksum));
+    }
+
+    private void downloadNamedStream(Bsl bsl, PacParser.Pac pac, PacParser.Entry e,
+                                     int chunk, Cb cb, int p0, int p1) throws IOException {
+        String name = e.idName;
+        EntrySrc src = new EntrySrc(pac, e);
+        try {
+            Sum32 cs = new Sum32();
+            byte[] buf = new byte[COPY_BUF];
+            long off = 0;
+            while (off < src.size) {
+                check();
+                int n = src.read(buf, 0, (int) Math.min(buf.length, src.size - off));
+                if (n <= 0) break;
+                cs.update(buf, 0, n);
+                off += n;
+                prog(cb, p0 + (int) ((p1 - p0) * 0.05 * off / Math.max(1, src.size)), "cek " + name);
+            }
+            long checksum = cs.value();
+            log(cb, "  checksum " + name + " = 0x" + Long.toHexString(checksum)
+                    + (src.size > 0xFFFFFFFFL ? " (mode 64-bit)" : ""));
+
+            byte[] start = namedStart(name, src.size, checksum);
+            Bsl.Resp r = bsl.transact(Bsl.CMD_START_DATA, start, 60000);
+            if (r == null) throw new IOException("START_DATA(" + name + ") tidak dijawab");
+            if (r.type == Bsl.REP_PART_NOT_FOUND) {
+                throw new IOException("Partisi \"" + name + "\" tidak ada di tabel FDL2. "
+                        + "Perangkat mungkin perlu repartition atau PAC bukan untuk model ini.");
+            }
+            if (r.type == Bsl.REP_LAYOUT_MISMATCH) {
+                throw new IOException("Ukuran partisi \"" + name + "\" tidak cocok dengan perangkat.");
+            }
+            if (r.type != Bsl.REP_ACK) {
+                throw new IOException("START_DATA(" + name + ") ditolak: " + Bsl.describeType(r.type));
+            }
+            src.seek(0);
+            sendChunksStream(bsl, src, chunk, cb, p0 + (int) ((p1 - p0) * 0.05), p1);
+            endData(bsl, 180000);
+        } finally {
+            src.close();
+        }
+    }
+
+    private void sendChunksStream(Bsl bsl, EntrySrc src, int chunk,
+                                  Cb cb, int p0, int p1) throws IOException {
+        byte[] buf = new byte[chunk];
+        long off = 0;
+        int lastPct = -1;
+        while (off < src.size) {
+            check();
+            int want = (int) Math.min(chunk, src.size - off);
+            int got = 0;
+            while (got < want) {
+                int n = src.read(buf, got, want - got);
+                if (n <= 0) throw new IOException("PAC terpotong di offset 0x"
+                        + Long.toHexString(off + got));
+                got += n;
+            }
+            byte[] part = (got == chunk) ? buf : copyOf(buf, got);
+            Bsl.Resp r = bsl.transact(Bsl.CMD_MIDST_DATA, part, 180000);
+            if (r == null || r.type != Bsl.REP_ACK) {
+                throw new IOException("MIDST_DATA gagal pada offset 0x"
+                        + Long.toHexString(off) + " ("
+                        + (r == null ? "timeout" : Bsl.describeType(r.type)) + ")");
+            }
+            off += got;
+            int pct = p0 + (int) ((p1 - p0) * (double) off / Math.max(1, src.size));
+            if (pct != lastPct) {
+                prog(cb, pct, "transfer");
+                lastPct = pct;
+            }
+        }
+    }
+
+    private static byte[] copyOf(byte[] src, int n) {
+        byte[] out = new byte[n];
+        System.arraycopy(src, 0, out, 0, n);
+        return out;
+    }
 
     private void downloadAddress(Bsl bsl, long addr, byte[] data, int chunk,
                                  boolean withChecksum, Cb cb, int p0, int p1)

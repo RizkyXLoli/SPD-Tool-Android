@@ -14,7 +14,7 @@ import java.util.HashMap;
  * Transport USB bulk untuk perangkat Unisoc (Spreadtrum).
  *
  * VID 0x1782:
- *   0x4D00 = BROM
+ *   0x4D00 = mode download (tahap awal, FDL1 belum jalan)
  *   0x5D00 = FDL1 berjalan
  *   0x3D00 = varian / engineering
  *   0x5D01, 0x4D01 dst. juga muncul pada beberapa chipset.
@@ -44,7 +44,7 @@ public class UsbTransport implements Bsl.Link {
         return d != null && d.getVendorId() == SPRD_VID;
     }
 
-    public static boolean isBrom(UsbDevice d) {
+    public static boolean isDownloadMode(UsbDevice d) {
         return isUnisoc(d) && (d.getProductId() & 0xFF00) == 0x4D00;
     }
 
@@ -52,7 +52,7 @@ public class UsbTransport implements Bsl.Link {
         if (d == null) return "?";
         if (!isUnisoc(d)) return "bukan Unisoc";
         int pid = d.getProductId();
-        if ((pid & 0xFF00) == 0x4D00) return "BROM";
+        if ((pid & 0xFF00) == 0x4D00) return "DOWNLOAD";
         if ((pid & 0xFF00) == 0x5D00) return "FDL";
         if ((pid & 0xFF00) == 0x3D00) return "ENG";
         return String.format("PID 0x%04X", pid);

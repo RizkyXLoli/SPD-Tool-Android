@@ -42,7 +42,7 @@ import java.util.Locale;
  * SPD Flasher — klien flashing Unisoc lewat USB OTG.
  *
  * Fitur: inspeksi PAC, flash partisi terpilih, backup/baca partisi, baca UID.
- * Tidak ada fungsi bypass/exploit; perangkat harus sudah dalam mode BROM/FDL.
+ * Tidak ada fungsi bypass/exploit; perangkat harus sudah dalam mode download/FDL.
  */
 public class MainActivity extends Activity {
 
@@ -110,7 +110,7 @@ public class MainActivity extends Activity {
         usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
         setContentView(buildUi());
         registerUsbReceiver();
-        log("SPD Flasher siap. Sambungkan HP Unisoc (mode download/BROM) via OTG.");
+        log("SPD Flasher siap. Sambungkan HP Unisoc (mode download) via OTG.");
         scanDevices(true);
     }
 
@@ -346,7 +346,7 @@ public class MainActivity extends Activity {
         if (transport != null) return transport;
         if (device == null) scanDevices(true);
         if (device == null) throw new IOException("Tidak ada perangkat. Sambungkan HP via OTG "
-                + "dan pastikan berada di mode download/BROM.");
+                + "dan pastikan berada di mode download.");
         if (!usbManager.hasPermission(device)) {
             requestPerm(device);
             throw new IOException("Menunggu izin USB — tekan izinkan lalu coba lagi.");

@@ -86,6 +86,8 @@ public class PacParser {
         public int crc1;
         public int crc2;
         public String xml = "";
+        public long xmlOffset = -1;
+        public long xmlSize = 0;
         public final List<Entry> entries = new ArrayList<>();
         public File file;
 
@@ -159,10 +161,14 @@ public class PacParser {
                     en.id = utf16(e, 4, 256);
                     en.name = utf16(e, 516, 256);
                     en.version = utf16(e, 1028, 256);
-                    en.size = eb.getInt(1540) & 0xFFFFFFFFL;
+                    // size & dataOffset adalah 64-bit: high dword di 1532/1536,
+                    // low dword di 1540/1552. PAC > 4 GiB butuh high dword.
+                    en.size = ((long) eb.getInt(1532) & 0xFFFFFFFFL) << 32
+                            | (eb.getInt(1540) & 0xFFFFFFFFL);
                     en.fileFlag = eb.getInt(1544);
                     en.checkFlag = eb.getInt(1548);
-                    en.dataOffset = eb.getInt(1552) & 0xFFFFFFFFL;
+                    en.dataOffset = ((long) eb.getInt(1536) & 0xFFFFFFFFL) << 32
+                            | (eb.getInt(1552) & 0xFFFFFFFFL);
                     en.omitFlag = eb.getInt(1556);
                     en.addrCount = eb.getInt(1560);
                     for (int k = 0; k < 5; k++) {
@@ -173,17 +179,33 @@ public class PacParser {
             }
 
             // --- blok XML
-            long xmlStart = (long) p.fileOffset + (long) p.fileCount * ENTRY_SIZE;
-            long xmlEnd = raf.length();
+            // PAC lama menaruh XML tepat setelah tabel entri. PAC baru (mis. X6725)
+            // menyimpannya sebagai entri tersendiri dengan fileFlag == 2 di akhir file.
+            Entry xmlEntry = null;
             for (Entry en : p.entries) {
-                if (en.dataOffset > xmlStart && en.dataOffset < xmlEnd) xmlEnd = en.dataOffset;
+                if (en.fileFlag == 2 && en.size > 0) { xmlEntry = en; break; }
             }
-            if (xmlStart > 0 && xmlStart < raf.length() && xmlEnd > xmlStart
-                    && (xmlEnd - xmlStart) < 32L * 1024 * 1024) {
-                raf.seek(xmlStart);
-                byte[] xb = new byte[(int) (xmlEnd - xmlStart)];
+            if (xmlEntry != null && xmlEntry.size < 32L * 1024 * 1024
+                    && xmlEntry.dataOffset + xmlEntry.size <= raf.length()) {
+                raf.seek(xmlEntry.dataOffset);
+                byte[] xb = new byte[(int) xmlEntry.size];
                 raf.readFully(xb);
                 p.xml = decodeXml(xb);
+                p.xmlOffset = xmlEntry.dataOffset;
+                p.xmlSize = xmlEntry.size;
+            } else {
+                long xmlStart = (long) p.fileOffset + (long) p.fileCount * ENTRY_SIZE;
+                long xmlEnd = raf.length();
+                for (Entry en : p.entries) {
+                    if (en.dataOffset > xmlStart && en.dataOffset < xmlEnd) xmlEnd = en.dataOffset;
+                }
+                if (xmlStart > 0 && xmlStart < raf.length() && xmlEnd > xmlStart
+                        && (xmlEnd - xmlStart) < 32L * 1024 * 1024) {
+                    raf.seek(xmlStart);
+                    byte[] xb = new byte[(int) (xmlEnd - xmlStart)];
+                    raf.readFully(xb);
+                    p.xml = decodeXml(xb);
+                }
             }
         } finally {
             try { raf.close(); } catch (IOException ignored) { }

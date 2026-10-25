@@ -15,7 +15,7 @@ import java.util.Arrays;
  *   escape: 0x7E -> 0x7D 0x5E ; 0x7D -> 0x7D 0x5D
  *
  * Checksum:
- *   - tahap BROM/FDL1 : CRC-16/CCITT (poly 0x1021, init 0) atas TYPE+LEN+PAYLOAD
+ *   - tahap awal/FDL1 : CRC-16/CCITT (poly 0x1021, init 0) atas TYPE+LEN+PAYLOAD
  *   - tahap FDL2      : ones-complement sum 16-bit (sum16)
  */
 public class Bsl {
@@ -263,7 +263,7 @@ public class Bsl {
 
     /**
      * Handshake legacy: kirim burst 0x7E, tunggu balasan berisi 0x7E.
-     * @return true bila perangkat menjawab (BROM atau FDL sudah jalan)
+     * @return true bila perangkat menjawab (mode download atau FDL sudah jalan)
      */
     public boolean handshake(int timeoutMs) throws IOException {
         link.flush();
