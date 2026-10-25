@@ -76,10 +76,10 @@ public class MainActivity extends Activity {
                     boolean granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
                     if (granted && d != null) {
                         device = d;
-                        log("Izin USB diberikan untuk " + d.getDeviceName());
+                        log("Izin USB diberikan. HP siap dipakai.");
                         refreshDeviceLabel();
                     } else {
-                        log("Izin USB DITOLAK");
+                        log("Izin USB ditolak. Tekan \"Izinkan\" saat HP meminta izin.");
                         toast("Izin USB ditolak");
                     }
                 }
@@ -87,7 +87,7 @@ public class MainActivity extends Activity {
                 UsbDevice d = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
                 if (UsbTransport.isUnisoc(d)) {
                     device = d;
-                    log("Perangkat Unisoc terpasang: " + d.getDeviceName());
+                    log("HP terpasang. Menunggu izin akses USB...");
                     refreshDeviceLabel();
                     requestPerm(d);
                 }
@@ -95,7 +95,7 @@ public class MainActivity extends Activity {
                 UsbDevice d = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
                 if (d != null && device != null && d.getDeviceName().equals(device.getDeviceName())) {
                     device = null;
-                    log("Perangkat USB dilepas");
+                    log("HP terlepas dari kabel OTG.");
                     refreshDeviceLabel();
                 }
             }
@@ -110,7 +110,8 @@ public class MainActivity extends Activity {
         usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
         setContentView(buildUi());
         registerUsbReceiver();
-        log("SPD Flasher siap. Sambungkan HP Unisoc (mode download) via OTG.");
+        log("Menunggu perangkat... Sambungkan HP Unisoc lewat OTG, lalu hidupkan "
+                + "sambil menekan tombol Volume (masuk mode download).");
         scanDevices(true);
     }
 
@@ -150,7 +151,7 @@ public class MainActivity extends Activity {
         root.addView(title);
 
         TextView sub = new TextView(this);
-        sub.setText("Flash firmware .pac lewat OTG. Tanpa bypass, tanpa exploit.");
+        sub.setText("Flash firmware .pac lewat OTG.");
         sub.setTextColor(0xFF9AA5B1);
         sub.setTextSize(11);
         sub.setPadding(0, dp(2), 0, dp(10));
@@ -308,14 +309,15 @@ public class MainActivity extends Activity {
         if (device != null) { try { return; } finally { } }
         UsbDevice d = UsbTransport.find(usbManager);
         if (d == null) {
-            if (!quiet) toast("Tidak ada perangkat Unisoc terdeteksi");
-            log("Pindai: tidak ada perangkat Unisoc (VID 0x1782).");
+            if (!quiet) toast("HP belum tersambung");
+            log("Menunggu perangkat... HP belum terdeteksi. Cek kabel OTG dan "
+                    + "pastikan HP dalam mode download.");
             refreshDeviceLabel();
             return;
         }
         device = d;
-        log(String.format(Locale.US, "Ditemukan %s  PID=0x%04X  (%s)",
-                d.getDeviceName(), d.getProductId(), UsbTransport.modeOf(d)));
+        log("Perangkat terdeteksi: HP Unisoc (PID 0x" + Integer.toHexString(d.getProductId())
+                + ", " + UsbTransport.modeOf(d) + ")");
         refreshDeviceLabel();
         if (!usbManager.hasPermission(d)) requestPerm(d);
     }
@@ -326,17 +328,16 @@ public class MainActivity extends Activity {
         PendingIntent pi = PendingIntent.getBroadcast(this, 0,
                 new Intent(ACTION_USB_PERMISSION).setPackage(getPackageName()), flags);
         usbManager.requestPermission(d, pi);
-        log("Meminta izin USB...");
+        log("Menunggu izin akses USB dari HP...");
     }
 
     private void refreshDeviceLabel() {
         ui.post(() -> {
             if (device == null) {
-                tvDevice.setText("Perangkat: —");
+                tvDevice.setText("Perangkat: belum tersambung");
                 tvDevice.setTextColor(0xFFFF8A80);
             } else {
-                tvDevice.setText(String.format(Locale.US, "Perangkat: VID 0x%04X PID 0x%04X — %s",
-                        device.getVendorId(), device.getProductId(), UsbTransport.modeOf(device)));
+                tvDevice.setText("Perangkat: tersambung — " + UsbTransport.modeOf(device));
                 tvDevice.setTextColor(0xFF80CBC4);
             }
         });
@@ -345,8 +346,8 @@ public class MainActivity extends Activity {
     private UsbTransport ensureTransport() throws IOException {
         if (transport != null) return transport;
         if (device == null) scanDevices(true);
-        if (device == null) throw new IOException("Tidak ada perangkat. Sambungkan HP via OTG "
-                + "dan pastikan berada di mode download.");
+        if (device == null) throw new IOException("HP belum tersambung. Sambungkan lewat OTG "
+                + "dan pastikan HP sudah masuk mode download.");
         if (!usbManager.hasPermission(device)) {
             requestPerm(device);
             throw new IOException("Menunggu izin USB — tekan izinkan lalu coba lagi.");
@@ -387,7 +388,7 @@ public class MainActivity extends Activity {
                 pacFile = dst;
                 pac = PacParser.parse(dst);
                 String nm = uri.getLastPathSegment();
-                log("PAC dimuat: " + nm);
+                log("Firmware dimuat: " + nm);
                 ui.post(() -> {
                     tvPac.setText("PAC: " + pac.productName + " " + pac.productVersion
                             + "  (" + PacParser.human(pac.size) + ")");
@@ -396,7 +397,7 @@ public class MainActivity extends Activity {
                 fillPartitions();
                 inspectPac();
             } catch (Exception e) {
-                log("Gagal memuat PAC: " + e.getMessage());
+                log("Gagal membaca firmware: " + e.getMessage());
                 toast("PAC tidak valid: " + e.getMessage());
             }
         }, "pac-load").start();
@@ -496,7 +497,7 @@ public class MainActivity extends Activity {
     private void doFlash(List<PacParser.Entry> sel) {
         if (busy) { toast("Sedang sibuk"); return; }
         setBusy(true);
-        log("=== MULAI FLASH ===");
+        log("=== MULAI FLASH === Jangan cabut kabel sampai selesai.");
         new Thread(() -> {
             FlashEngine eng = new FlashEngine();
             UsbTransport t = null;
@@ -561,13 +562,13 @@ public class MainActivity extends Activity {
                 File dir = getExternalFilesDir(null);
                 if (dir == null) dir = getFilesDir();
                 File out = new File(dir, name.replaceAll("[^A-Za-z0-9._-]", "_") + ".img");
-                log("Membaca " + name + " -> " + out.getAbsolutePath());
+                log("Membaca partisi " + name + "...");
                 new FlashEngine().readPartition(t, name, e.size, out, prog);
                 log("Backup selesai: " + out.getAbsolutePath()
                         + " (" + PacParser.human(out.length()) + ")");
                 toast("Tersimpan: " + out.getName());
             } catch (Exception ex) {
-                log("Gagal baca: " + ex.getMessage());
+                log("Gagal membaca partisi: " + ex.getMessage());
                 toast("Gagal: " + ex.getMessage());
             } finally {
                 if (t != null) { try { t.close(); } catch (Exception ignored) { } }
@@ -585,14 +586,14 @@ public class MainActivity extends Activity {
             try {
                 t = ensureTransport();
                 String uid = new FlashEngine().readChipUid(t, prog);
-                log("Chip UID: " + uid);
+                log("UID chip: " + uid);
                 final String u = uid;
                 ui.post(() -> new AlertDialog.Builder(this)
                         .setTitle("Chip UID")
                         .setMessage(u)
                         .setPositiveButton("OK", null).show());
             } catch (Exception ex) {
-                log("Gagal baca UID: " + ex.getMessage());
+                log("Gagal membaca UID: " + ex.getMessage());
                 toast("Gagal: " + ex.getMessage());
             } finally {
                 if (t != null) { try { t.close(); } catch (Exception ignored) { } }

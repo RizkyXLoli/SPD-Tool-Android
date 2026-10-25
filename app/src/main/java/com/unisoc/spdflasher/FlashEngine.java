@@ -58,13 +58,13 @@ public class FlashEngine {
         Bsl bsl = new Bsl(t);
         t.setIoTimeout(3000);
 
-        log(cb, "Handshake dengan perangkat...");
+        log(cb, "Menghubungkan ke HP...");
         prog(cb, 1, "handshake");
         if (!bsl.handshake(4000)) {
             throw new IOException("Perangkat tidak merespons. Pastikan HP dalam mode "
                     + "download dan kabel OTG terpasang dengan benar.");
         }
-        log(cb, "Perangkat merespons BSL.");
+        log(cb, "HP merespons. Koneksi berhasil.");
 
         // ---- cek apakah sudah di FDL (string 'Spreadtrum' pada balasan)
         boolean inFdl = false;
@@ -72,12 +72,12 @@ public class FlashEngine {
             Bsl.Resp v = bsl.transact(Bsl.CMD_CONNECT, new byte[0], 2000);
             if (v != null) {
                 String s = Bsl.printable(v.payload);
-                log(cb, "CONNECT -> " + Bsl.describeType(v.type)
+                log(cb, "Mode terdeteksi: " + Bsl.describeType(v.type)
                         + (s.trim().isEmpty() ? "" : "  \"" + s.trim() + "\""));
                 if (s.toLowerCase(Locale.ROOT).contains("spreadtrum")) inFdl = true;
             }
         } catch (IOException e) {
-            log(cb, "CONNECT gagal: " + e.getMessage());
+            log(cb, "Gagal menyambung ke mode download: " + e.getMessage());
         }
         check();
 
@@ -96,12 +96,12 @@ public class FlashEngine {
             prog(cb, 5, "muat FDL1");
             downloadAddress(bsl, addr1, data1, 512, false, cb, 5, 12);
 
-            log(cb, "EXEC FDL1...");
+            log(cb, "Menjalankan FDL1 (loader tahap 1)...");
             Bsl.Resp r = bsl.transact(Bsl.CMD_EXEC_DATA, Bsl.be32(addr1), 3000);
             log(cb, "  -> " + (r == null ? "tanpa balasan" : Bsl.describeType(r.type)));
 
             // FDL1 jalan -> perangkat re-enumerate
-            log(cb, "Menunggu perangkat re-enumerate...");
+            log(cb, "Menunggu perangkat tersambung ulang...");
             prog(cb, 13, "re-enumerate");
             try { t.close(); } catch (Exception ignored) { }
             Thread.sleep(1500);
@@ -110,13 +110,13 @@ public class FlashEngine {
             if (!bsl.handshake(5000)) {
                 throw new IOException("Perangkat tidak kembali setelah FDL1 dijalankan");
             }
-            log(cb, "Perangkat kembali di mode FDL.");
+            log(cb, "HP kembali tersambung, siap lanjut.");
         }
 
         // ---------- tahap 2: FDL2
         bsl.setUseSum16(true);
         Bsl.Resp c2 = bsl.transact(Bsl.CMD_CONNECT, new byte[0], 2500);
-        log(cb, "CONNECT(FDL2) -> " + (c2 == null ? "tanpa balasan" : Bsl.describeType(c2.type)));
+        log(cb, "Lanjut ke FDL2 -> " + (c2 == null ? "tanpa balasan" : Bsl.describeType(c2.type)));
 
         boolean transcodeSupported = false;
         if (c2 != null && c2.payload.length >= 8) {
@@ -127,7 +127,7 @@ public class FlashEngine {
         }
 
         Bsl.Resp cb2 = bsl.transact(Bsl.CMD_CHANGE_BAUD, Bsl.be32(115200), 2000);
-        log(cb, "CHANGE_BAUD -> " + (cb2 == null ? "tanpa balasan (diabaikan)" : Bsl.describeType(cb2.type)));
+        log(cb, "Menaikkan kecepatan transfer -> " + (cb2 == null ? "tanpa balasan (diabaikan)" : Bsl.describeType(cb2.type)));
 
         PacParser.Entry fdl2 = findFdl(pac, 2);
         if (fdl2 != null && fdl2.hasData()) {
@@ -138,20 +138,20 @@ public class FlashEngine {
                         + " ke 0x" + Long.toHexString(addr2));
                 prog(cb, 15, "muat FDL2");
                 downloadAddress(bsl, addr2, data2, 1024, false, cb, 15, 28);
-                log(cb, "EXEC FDL2...");
+                log(cb, "Menjalankan FDL2 (loader tahap 2)...");
                 Bsl.Resp r2 = bsl.transact(Bsl.CMD_EXEC_DATA, Bsl.be32(addr2), 3000);
                 log(cb, "  -> " + (r2 == null ? "tanpa balasan" : Bsl.describeType(r2.type)));
                 Thread.sleep(2000);
             }
         } else {
-            log(cb, "PAC tanpa FDL2 — mengandalkan FDL yang sudah berjalan.");
+            log(cb, "Firmware ini tanpa FDL2 — memakai loader yang sudah berjalan.");
         }
 
         // ---------- ExecNandInit
         prog(cb, 30, "inisialisasi flash");
         Bsl.Resp init = bsl.transact(Bsl.CMD_EXEC_DATA, new byte[0], 60000);
         int initType = init == null ? -1 : init.type;
-        log(cb, "ExecNandInit -> " + (init == null ? "tanpa balasan" : Bsl.describeType(initType)));
+        log(cb, "Menyiapkan penyimpanan HP -> " + (init == null ? "tanpa balasan" : Bsl.describeType(initType)));
 
         if (init != null && init.payload.length >= 8 && !transcodeSupported) {
             long ver = Bsl.beToLong(init.payload, 0, 4);
@@ -160,12 +160,12 @@ public class FlashEngine {
         }
 
         if (initType == Bsl.REP_LAYOUT_MISMATCH) {
-            log(cb, "Tabel partisi di perangkat tidak cocok dengan firmware.");
+            log(cb, "Susunan partisi di HP berbeda dengan firmware.");
             if (!allowRepartition) {
                 throw new IOException("Layout partisi berbeda. Aktifkan opsi "
                         + "\"Izinkan repartition\" bila Anda yakin firmware ini untuk perangkat ini.");
             }
-            log(cb, "Melakukan repartition sesuai XML PAC...");
+            log(cb, "Menyusun ulang partisi mengikuti firmware...");
             repartition(bsl, pac, cb);
             bsl.transact(Bsl.CMD_EXEC_DATA, new byte[0], 60000);
         }
@@ -174,7 +174,7 @@ public class FlashEngine {
             Bsl.Resp dt = bsl.transact(Bsl.CMD_DISABLE_TRANSCODE, new byte[0], 2000);
             if (bsl.isAck(dt)) {
                 bsl.setNoTranscode(true);
-                log(cb, "Mode transcode dimatikan (transfer lebih cepat).");
+                log(cb, "Mode transcode dimatikan supaya transfer lebih cepat.");
             }
         }
 
@@ -218,12 +218,12 @@ public class FlashEngine {
         }
 
         check();
-        log(cb, "Semua partisi terkirim dalam "
+        log(cb, "Semua partisi selesai dikirim dalam "
                 + ((System.currentTimeMillis() - t0) / 1000) + " detik. Reset perangkat...");
         prog(cb, 97, "reset");
         bsl.transact(Bsl.CMD_NORMAL_RESET, new byte[0], 3000);
         prog(cb, 100, "selesai");
-        log(cb, "SELESAI. Perangkat akan reboot.");
+        log(cb, "SELESAI. HP akan menyala ulang sendiri. Jangan cabut kabel.");
     }
 
     private boolean canFlash(PacParser.Entry e) {
@@ -515,7 +515,7 @@ public class FlashEngine {
             bo.write(sz, 0, sz.length);
         }
         Bsl.Resp r = bsl.transact(Bsl.CMD_REPARTITION, bo.toByteArray(), 60000);
-        log(cb, "REPARTITION (" + parts.size() + " entri) -> "
+        log(cb, "Menyusun ulang partisi (" + parts.size() + " entri) -> "
                 + (r == null ? "tanpa balasan" : Bsl.describeType(r.type)));
     }
 
