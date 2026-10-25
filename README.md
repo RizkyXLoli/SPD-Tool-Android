@@ -3,5 +3,6 @@
  GK keputus tengah jalan
  
 # Cara Penggunaan 
- *Pilih file .pac
+ * Pilih file .pac
  * sisanya sama kayak pakai di PC/laptop
+
