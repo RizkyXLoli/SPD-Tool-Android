@@ -3,31 +3,15 @@ package com.unisoc.spdflasher;
 import java.io.IOException;
 import java.util.Arrays;
 
-/**
- * Implementasi protokol BSL (Boot Serial Link) Unisoc/Spreadtrum di atas
- * kanal bulk USB.
- *
- * Paket (sebelum framing), semua big-endian:
- *   [TYPE:2][LENGTH:2][PAYLOAD:N][CHECKSUM:2]
- *
- * Framing HDLC:
- *   0x7E | escape(body) | 0x7E
- *   escape: 0x7E -> 0x7D 0x5E ; 0x7D -> 0x7D 0x5D
- *
- * Checksum:
- *   - tahap awal/FDL1 : CRC-16/CCITT (poly 0x1021, init 0) atas TYPE+LEN+PAYLOAD
- *   - tahap FDL2      : ones-complement sum 16-bit (sum16)
- */
 public class Bsl {
 
     public interface Link {
         void write(byte[] data) throws IOException;
-        /** Kembalikan byte yang tersedia; array kosong bila timeout. */
+
         byte[] read(int timeoutMs) throws IOException;
         void flush() throws IOException;
     }
 
-    // perintah
     public static final int CMD_CONNECT = 0x00;
     public static final int CMD_START_DATA = 0x01;
     public static final int CMD_MIDST_DATA = 0x02;
@@ -43,7 +27,6 @@ public class Bsl {
     public static final int CMD_READ_CHIP_UID = 0x1A;
     public static final int CMD_DISABLE_TRANSCODE = 0x21;
 
-    // respon
     public static final int REP_ACK = 0x80;
     public static final int REP_BSL_VER = 0x81;
     public static final int REP_INVALID_CMD = 0x82;
@@ -87,8 +70,6 @@ public class Bsl {
     public void setNoTranscode(boolean v) { noTranscode = v; }
     public boolean isNoTranscode() { return noTranscode; }
 
-    // ------------------------------------------------------------ checksums
-
     public static int crc16ccitt(byte[] d, int off, int len) {
         int crc = 0;
         for (int i = off; i < off + len; i++) {
@@ -113,7 +94,6 @@ public class Bsl {
         return (~(int) s) & 0xFFFF;
     }
 
-    /** sum32 big-endian words — dipakai sebagai checksum payload data. */
     public static long sum32(byte[] d, int off, int len) {
         long s = 0;
         for (int i = 0; i < len; i += 4) {
@@ -125,8 +105,6 @@ public class Bsl {
         }
         return s;
     }
-
-    // ------------------------------------------------------------- framing
 
     private byte[] frame(int type, byte[] payload) {
         int plen = payload == null ? 0 : payload.length;
@@ -151,7 +129,7 @@ public class Bsl {
             out[out.length - 1] = 0x7E;
             return out;
         }
-        // escape
+
         byte[] tmp = new byte[body.length * 2 + 2];
         int n = 0;
         tmp[n++] = 0x7E;
@@ -168,8 +146,6 @@ public class Bsl {
         return Arrays.copyOf(tmp, n);
     }
 
-    // ---------------------------------------------------------------- io
-
     public boolean send(int type, byte[] payload) throws IOException {
         link.write(frame(type, payload));
         return true;
@@ -184,7 +160,7 @@ public class Bsl {
             byte[] chunk = link.read(wait);
             if (chunk != null && chunk.length > 0) {
                 if (accLen + chunk.length > acc.length) {
-                    accLen = 0; // buang buffer bila meluap
+                    accLen = 0;
                 }
                 int copy = Math.min(chunk.length, acc.length - accLen);
                 System.arraycopy(chunk, 0, acc, accLen, copy);
@@ -211,7 +187,7 @@ public class Bsl {
         if (start < 0) { accLen = 0; return null; }
 
         if (noTranscode) {
-            // body mentah: butuh 4 byte header untuk tahu panjang
+
             if (accLen - start - 1 < 4) return null;
             int plen = ((acc[start + 3] & 0xFF) << 8) | (acc[start + 4] & 0xFF);
             int total = 1 + 4 + plen + 2;
@@ -239,7 +215,7 @@ public class Bsl {
             }
             out[w++] = (byte) b;
         }
-        if (i >= accLen) return null;         // frame belum lengkap
+        if (i >= accLen) return null;
         if (w < 4) { shift(i + 1); return null; }
 
         int plen = ((out[2] & 0xFF) << 8) | (out[3] & 0xFF);
@@ -259,12 +235,6 @@ public class Bsl {
 
     public void resetBuffer() { accLen = 0; }
 
-    // ------------------------------------------------------------ handshake
-
-    /**
-     * Handshake legacy: kirim burst 0x7E, tunggu balasan berisi 0x7E.
-     * @return true bila perangkat menjawab (mode download atau FDL sudah jalan)
-     */
     public boolean handshake(int timeoutMs) throws IOException {
         link.flush();
         resetBuffer();
@@ -301,8 +271,6 @@ public class Bsl {
         return sb.toString();
     }
 
-    // ------------------------------------------------------------- helpers
-
     public static byte[] be32(long v) {
         return new byte[]{(byte) ((v >> 24) & 0xFF), (byte) ((v >> 16) & 0xFF),
                 (byte) ((v >> 8) & 0xFF), (byte) (v & 0xFF)};
@@ -319,7 +287,6 @@ public class Bsl {
         return v;
     }
 
-    /** Nama 72 byte UTF-16LE, zero padded. */
     public static byte[] name72(String name) {
         byte[] out = new byte[72];
         for (int i = 0; i < 36 && i < name.length(); i++) {

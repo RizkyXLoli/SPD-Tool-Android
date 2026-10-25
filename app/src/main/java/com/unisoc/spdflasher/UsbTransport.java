@@ -10,15 +10,6 @@ import android.hardware.usb.UsbManager;
 import java.io.IOException;
 import java.util.HashMap;
 
-/**
- * Transport USB bulk untuk perangkat Unisoc (Spreadtrum).
- *
- * VID 0x1782:
- *   0x4D00 = mode download (tahap awal, FDL1 belum jalan)
- *   0x5D00 = FDL1 berjalan
- *   0x3D00 = varian / engineering
- *   0x5D01, 0x4D01 dst. juga muncul pada beberapa chipset.
- */
 public class UsbTransport implements Bsl.Link {
 
     public static final int SPRD_VID = 0x1782;
@@ -58,7 +49,6 @@ public class UsbTransport implements Bsl.Link {
         return String.format("PID 0x%04X", pid);
     }
 
-    /** Cari perangkat Unisoc yang punya izin akses. */
     public static UsbDevice find(UsbManager mgr) {
         HashMap<String, UsbDevice> map = mgr.getDeviceList();
         for (UsbDevice d : map.values()) {
@@ -78,7 +68,6 @@ public class UsbTransport implements Bsl.Link {
         return null;
     }
 
-    /** Buka koneksi & klaim interface pertama yang punya bulk IN + OUT. */
     public static UsbTransport open(UsbManager mgr, UsbDevice dev) throws IOException {
         if (dev == null) throw new IOException("Tidak ada perangkat Unisoc terdeteksi");
         if (!mgr.hasPermission(dev)) throw new IOException("Izin USB belum diberikan");

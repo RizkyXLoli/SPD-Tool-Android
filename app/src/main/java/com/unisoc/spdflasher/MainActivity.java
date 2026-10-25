@@ -38,12 +38,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
-/**
- * SPD Flasher — klien flashing Unisoc lewat USB OTG.
- *
- * Fitur: inspeksi PAC, flash partisi terpilih, backup/baca partisi, baca UID.
- * Tidak ada fungsi bypass/exploit; perangkat harus sudah dalam mode download/FDL.
- */
 public class MainActivity extends Activity {
 
     private static final String ACTION_USB_PERMISSION = "com.unisoc.spdflasher.USB_PERMISSION";
@@ -59,7 +53,9 @@ public class MainActivity extends Activity {
     private TextView tvDevice, tvPac, tvLog;
     private LinearLayout partBox;
     private ProgressBar progress;
-    private Button btnDevice, btnPac, btnFlash, btnUid, btnDump, btnCheck;
+    private Button btnDevice, btnPac, btnFlash, btnUid, btnDump, btnCheck, btnFb, btnForceFb;
+    private Fastboot fb;
+    private UsbDevice fbDevice;
     private CheckBox cbRepart, cbSkipFdl;
 
     private final List<CheckBox> partChecks = new ArrayList<>();
@@ -75,8 +71,13 @@ public class MainActivity extends Activity {
                     UsbDevice d = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
                     boolean granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false);
                     if (granted && d != null) {
-                        device = d;
-                        log("Izin USB diberikan. HP siap dipakai.");
+                        if (Fastboot.isFastboot(d)) {
+                            fbDevice = d;
+                            log("Izin USB diberikan untuk mode fastboot.");
+                        } else {
+                            device = d;
+                            log("Izin USB diberikan. HP siap dipakai.");
+                        }
                         refreshDeviceLabel();
                     } else {
                         log("Izin USB ditolak. Tekan \"Izinkan\" saat HP meminta izin.");
@@ -85,7 +86,12 @@ public class MainActivity extends Activity {
                 }
             } else if (UsbManager.ACTION_USB_DEVICE_ATTACHED.equals(a)) {
                 UsbDevice d = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
-                if (UsbTransport.isUnisoc(d)) {
+                if (Fastboot.isFastboot(d)) {
+                    fbDevice = d;
+                    log("HP terpasang dalam mode fastboot.");
+                    refreshDeviceLabel();
+                    if (!usbManager.hasPermission(d)) requestPerm(d);
+                } else if (UsbTransport.isUnisoc(d)) {
                     device = d;
                     log("HP terpasang. Menunggu izin akses USB...");
                     refreshDeviceLabel();
@@ -93,16 +99,24 @@ public class MainActivity extends Activity {
                 }
             } else if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(a)) {
                 UsbDevice d = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
-                if (d != null && device != null && d.getDeviceName().equals(device.getDeviceName())) {
+                if (d == null) return;
+                boolean hit = false;
+                if (device != null && d.getDeviceName().equals(device.getDeviceName())) {
                     device = null;
+                    hit = true;
+                }
+                if (fbDevice != null && d.getDeviceName().equals(fbDevice.getDeviceName())) {
+                    fbDevice = null;
+                    fb = null;
+                    hit = true;
+                }
+                if (hit) {
                     log("HP terlepas dari kabel OTG.");
                     refreshDeviceLabel();
                 }
             }
         }
     };
-
-    // ============================================================= lifecycle
 
     @Override
     protected void onCreate(Bundle b) {
@@ -133,8 +147,6 @@ public class MainActivity extends Activity {
             registerReceiver(usbReceiver, f);
         }
     }
-
-    // ==================================================================== UI
 
     private View buildUi() {
         int pad = dp(12);
@@ -183,6 +195,12 @@ public class MainActivity extends Activity {
         ));
         btnFlash.setTextColor(0xFF00E676);
         btnDump.setTextColor(0xFFFFD54F);
+
+        root.addView(row(
+                btnForceFb = button("Paksa Fastboot", v -> forceFastboot()),
+                btnFb = button("Menu Fastboot", v -> fastbootMenu())
+        ));
+        btnForceFb.setTextColor(0xFFFF7043);
 
         cbRepart = new CheckBox(this);
         cbRepart.setText("Izinkan repartition bila layout beda");
@@ -302,8 +320,6 @@ public class MainActivity extends Activity {
         }
     }
 
-    // ================================================================ device
-
     private void scanDevices(boolean quiet) {
         if (usbManager == null) { toast("USB host tidak tersedia"); return; }
         if (device != null) { try { return; } finally { } }
@@ -333,7 +349,10 @@ public class MainActivity extends Activity {
 
     private void refreshDeviceLabel() {
         ui.post(() -> {
-            if (device == null) {
+            if (device == null && fbDevice != null) {
+                tvDevice.setText("Perangkat: tersambung — mode fastboot");
+                tvDevice.setTextColor(0xFF80CBC4);
+            } else if (device == null) {
                 tvDevice.setText("Perangkat: belum tersambung");
                 tvDevice.setTextColor(0xFFFF8A80);
             } else {
@@ -356,7 +375,144 @@ public class MainActivity extends Activity {
         return transport;
     }
 
-    // =================================================================== PAC
+    private Fastboot ensureFastboot() throws IOException {
+        if (fb != null) return fb;
+        UsbDevice d = fbDevice;
+        if (d == null) d = Fastboot.find(usbManager);
+        if (d == null) {
+            throw new IOException("Tidak ada perangkat fastboot. Sambungkan HP "
+                    + "dalam mode fastboot lewat OTG.");
+        }
+        if (!usbManager.hasPermission(d)) {
+            requestPerm(d);
+            throw new IOException("Menunggu izin USB — tekan izinkan lalu coba lagi.");
+        }
+        fbDevice = d;
+        fb = Fastboot.open(usbManager, d);
+        return fb;
+    }
+
+    private void fastbootMenu() {
+        String[] items = {
+                "Cek info perangkat",
+                "Reboot ke sistem",
+                "Reboot ke fastboot",
+                "Reboot ke recovery",
+                "Lanjutkan boot (continue)"
+        };
+        new AlertDialog.Builder(this)
+                .setTitle("Menu Fastboot")
+                .setItems(items, (dlg, which) -> {
+                    new Thread(() -> {
+                        try {
+                            Fastboot f = ensureFastboot();
+                            String out;
+                            if (which == 0) {
+                                out = "produk: " + f.getvar("product") + "\n"
+                                        + "versi: " + f.getvar("version") + "\n"
+                                        + "slot: " + f.getvar("current-slot") + "\n"
+                                        + "terkunci: " + f.getvar("unlocked") + "\n"
+                                        + "secure: " + f.getvar("secure");
+                            } else {
+                                if (which == 1) f.command("reboot");
+                                else if (which == 2) f.rebootBootloader();
+                                else if (which == 3) f.command("reboot-recovery");
+                                else f.continueBoot();
+                                out = "Perintah dikirim.";
+                            }
+                            log(out);
+                        } catch (Exception e) {
+                            log("Fastboot gagal: " + e.getMessage());
+                        }
+                    }, "fb-menu").start();
+                })
+                .setNegativeButton("Tutup", null)
+                .show();
+    }
+
+    private void forceFastboot() {
+        if (device == null) {
+            toast("Sambungkan HP dalam mode download dulu (bukan fastboot).");
+            return;
+        }
+        String[] modes = {"fastboot", "boot-fastboot", "recovery", "bootonce-bootloader"};
+        new AlertDialog.Builder(this)
+                .setTitle("Paksa masuk Fastboot")
+                .setMessage("HP akan ditulis perintah boot ke partisi misc lalu restart "
+                        + "sendiri ke fastboot.\n\nPakai ini bila HP berhenti di logo "
+                        + "setelah flashing dan tidak bisa masuk fastboot dengan tombol.")
+                .setItems(modes, (dlg, which) -> runForceFastboot(modes[which]))
+                .setNegativeButton("Batal", null)
+                .show();
+    }
+
+    private void runForceFastboot(String command) {
+        if (pac == null) {
+            toast("Pilih file .pac dulu — FDL diambil dari firmware.");
+            return;
+        }
+        setBusy(true);
+        log("=== PAKSA FASTBOOT === Perintah: " + command);
+        new Thread(() -> {
+            FlashEngine eng = new FlashEngine();
+            UsbTransport t = null;
+            try {
+                t = ensureTransport();
+                final UsbManager m = usbManager;
+                FlashEngine.Opener opener = waitMs -> {
+                    long end = System.currentTimeMillis() + waitMs;
+                    while (System.currentTimeMillis() < end) {
+                        UsbDevice d = UsbTransport.find(m);
+                        if (d != null && m.hasPermission(d)) {
+                            ui.post(() -> { device = d; refreshDeviceLabel(); });
+                            return UsbTransport.open(m, d);
+                        }
+                        try {
+                            Thread.sleep(300);
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                            throw new IOException("Dibatalkan saat menunggu perangkat");
+                        }
+                    }
+                    throw new IOException("Perangkat tidak muncul kembali");
+                };
+                eng.forceFastboot(t, opener, pac, command, prog);
+                toast("Perintah fastboot terkirim");
+                awaitFastboot();
+            } catch (Exception e) {
+                log("GAGAL paksa fastboot: " + e.getMessage());
+                toast("Gagal: " + e.getMessage());
+            } finally {
+                if (t != null) { try { t.close(); } catch (Exception ignored) { } }
+                transport = null;
+                device = null;
+                setBusy(false);
+                refreshDeviceLabel();
+            }
+        }, "force-fb").start();
+    }
+
+    private void awaitFastboot() {
+        log("Menunggu HP muncul sebagai perangkat fastboot...");
+        long end = System.currentTimeMillis() + 90000;
+        while (System.currentTimeMillis() < end) {
+            UsbDevice d = Fastboot.find(usbManager);
+            if (d != null) {
+                if (!usbManager.hasPermission(d)) requestPerm(d);
+                final UsbDevice fd = d;
+                ui.post(() -> { fbDevice = fd; refreshDeviceLabel(); });
+                log("HP terdeteksi dalam mode fastboot.");
+                return;
+            }
+            try {
+                Thread.sleep(500);
+            } catch (InterruptedException ie) {
+                return;
+            }
+        }
+        log("HP belum muncul sebagai perangkat fastboot. Cabut-pasang kabel OTG, "
+                + "lalu tekan \"Menu Fastboot\".");
+    }
 
     private void pickPac() {
         Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
@@ -465,8 +621,6 @@ public class MainActivity extends Activity {
                 .setPositiveButton("OK", null)
                 .show());
     }
-
-    // ================================================================ FLASH
 
     private void confirmFlash() {
         if (pac == null) { toast("Pilih PAC dulu"); return; }

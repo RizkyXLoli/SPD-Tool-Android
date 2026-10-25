@@ -9,17 +9,6 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
 
-/**
- * Alur kerja flashing Unisoc (setara fungsi inti SPD Upgrade Tool):
- *
- *   mode download -> muat FDL1 -> EXEC -> re-enumerate
- *        -> muat FDL2 -> EXEC -> ExecNandInit
- *        -> per partisi: START_DATA -> MIDST_DATA x N -> END_DATA
- *        -> NORMAL_RESET
- *
- * Tidak ada operasi bypass/autentikasi yang diakali: perangkat harus berada
- * dalam mode download (FDL) dan firmware harus cocok dengan perangkat.
- */
 public class FlashEngine {
 
     public interface Cb {
@@ -28,9 +17,11 @@ public class FlashEngine {
     }
 
     public interface Opener {
-        /** Buka ulang transport setelah perangkat re-enumerate. */
+
         UsbTransport reopen(int waitMs) throws IOException;
     }
+
+    private static final int MISC_SIZE = 4096;
 
     private volatile boolean cancelled = false;
 
@@ -48,11 +39,15 @@ public class FlashEngine {
         if (cb != null) cb.progress(p, s);
     }
 
-    // ================================================================ FLASH
+    public static final class Session {
+        public final UsbTransport transport;
+        public final Bsl bsl;
+        Session(UsbTransport t, Bsl b) { transport = t; bsl = b; }
+    }
 
-    public void flash(UsbTransport t, Opener opener, PacParser.Pac pac,
-                      List<PacParser.Entry> selected, boolean allowRepartition,
-                      boolean skipFdlLoad, Cb cb) throws Exception {
+    public Session openFdl(UsbTransport t, Opener opener, PacParser.Pac pac,
+                           boolean allowRepartition, boolean skipFdlLoad, Cb cb)
+            throws Exception {
 
         cancelled = false;
         Bsl bsl = new Bsl(t);
@@ -66,7 +61,6 @@ public class FlashEngine {
         }
         log(cb, "HP merespons. Koneksi berhasil.");
 
-        // ---- cek apakah sudah di FDL (string 'Spreadtrum' pada balasan)
         boolean inFdl = false;
         try {
             Bsl.Resp v = bsl.transact(Bsl.CMD_CONNECT, new byte[0], 2000);
@@ -82,7 +76,7 @@ public class FlashEngine {
         check();
 
         if (!inFdl && !skipFdlLoad) {
-            // ---------- tahap 1: FDL1
+
             PacParser.Entry fdl1 = findFdl(pac, 1);
             if (fdl1 == null) {
                 throw new IOException("FDL1 tidak ada di dalam PAC — pakai PAC firmware "
@@ -100,7 +94,6 @@ public class FlashEngine {
             Bsl.Resp r = bsl.transact(Bsl.CMD_EXEC_DATA, Bsl.be32(addr1), 3000);
             log(cb, "  -> " + (r == null ? "tanpa balasan" : Bsl.describeType(r.type)));
 
-            // FDL1 jalan -> perangkat re-enumerate
             log(cb, "Menunggu perangkat tersambung ulang...");
             prog(cb, 13, "re-enumerate");
             try { t.close(); } catch (Exception ignored) { }
@@ -113,7 +106,6 @@ public class FlashEngine {
             log(cb, "HP kembali tersambung, siap lanjut.");
         }
 
-        // ---------- tahap 2: FDL2
         bsl.setUseSum16(true);
         Bsl.Resp c2 = bsl.transact(Bsl.CMD_CONNECT, new byte[0], 2500);
         log(cb, "Lanjut ke FDL2 -> " + (c2 == null ? "tanpa balasan" : Bsl.describeType(c2.type)));
@@ -147,7 +139,6 @@ public class FlashEngine {
             log(cb, "Firmware ini tanpa FDL2 — memakai loader yang sudah berjalan.");
         }
 
-        // ---------- ExecNandInit
         prog(cb, 30, "inisialisasi flash");
         Bsl.Resp init = bsl.transact(Bsl.CMD_EXEC_DATA, new byte[0], 60000);
         int initType = init == null ? -1 : init.type;
@@ -178,7 +169,16 @@ public class FlashEngine {
             }
         }
 
-        // ---------- tulis partisi
+        return new Session(t, bsl);
+    }
+
+    public void flash(UsbTransport t, Opener opener, PacParser.Pac pac,
+                      List<PacParser.Entry> selected, boolean allowRepartition,
+                      boolean skipFdlLoad, Cb cb) throws Exception {
+
+        Session s = openFdl(t, opener, pac, allowRepartition, skipFdlLoad, cb);
+        Bsl bsl = s.bsl;
+
         List<PacParser.Entry> list = selected != null ? selected : new ArrayList<>(pac.entries);
         int total = 0;
         for (PacParser.Entry e : list) if (canFlash(e)) total++;
@@ -188,8 +188,7 @@ public class FlashEngine {
         for (PacParser.Entry e : list) {
             check();
             if (!canFlash(e)) continue;
-            boolean isFdl = isFdlEntry(e);
-            if (isFdl) continue;
+            if (isFdlEntry(e)) continue;
 
             done++;
             int basePct = 30 + (int) (65.0 * (done - 1) / Math.max(1, total));
@@ -198,7 +197,6 @@ public class FlashEngine {
             prog(cb, basePct, nm);
 
             boolean named = !e.idName.isEmpty() && (e.type.contains("2") || e.baseAddress <= 0);
-            // LENGTH di header BSL hanya 16-bit -> payload wajib <= 65535 byte
             int chunk = e.type.startsWith("CODE2") || e.type.startsWith("YAFFS") ? 16384 : 32768;
 
             final int d = done;
@@ -226,6 +224,44 @@ public class FlashEngine {
         log(cb, "SELESAI. HP akan menyala ulang sendiri. Jangan cabut kabel.");
     }
 
+    public void forceFastboot(UsbTransport t, Opener opener, PacParser.Pac pac,
+                              String command, Cb cb) throws Exception {
+        Session s = openFdl(t, opener, pac, false, false, cb);
+        try {
+            log(cb, "Menulis perintah boot ke partisi misc...");
+            prog(cb, 80, "tulis misc");
+            writeMiscCommand(s.bsl, command, cb);
+            log(cb, "Perintah \"" + command + "\" tersimpan. HP akan restart "
+                    + "dan langsung masuk fastboot.");
+            prog(cb, 95, "restart");
+            s.bsl.transact(Bsl.CMD_NORMAL_RESET, new byte[0], 3000);
+            prog(cb, 100, "selesai");
+            log(cb, "Selesai. Cabut kabel OTG lalu sambungkan lagi — HP akan "
+                    + "terdeteksi sebagai perangkat fastboot.");
+        } finally {
+            try { s.transport.close(); } catch (Exception ignored) { }
+        }
+    }
+
+    private void writeMiscCommand(Bsl bsl, String command, Cb cb) throws IOException {
+        byte[] misc = new byte[MISC_SIZE];
+        byte[] cmd = command.getBytes("US-ASCII");
+        System.arraycopy(cmd, 0, misc, 0, Math.min(cmd.length, 31));
+
+        long sum = Bsl.sum32(misc, 0, misc.length);
+        byte[] start = concat(Bsl.name72("misc"), Bsl.le32(misc.length), Bsl.be32(sum));
+        Bsl.Resp r = bsl.transact(Bsl.CMD_START_DATA, start, 30000);
+        if (r == null) throw new IOException("Perangkat tidak menjawab saat menulis misc");
+        if (r.type == Bsl.REP_PART_NOT_FOUND) {
+            throw new IOException("Partisi \"misc\" tidak ditemukan di HP ini.");
+        }
+        if (r.type != Bsl.REP_ACK) {
+            throw new IOException("Penulisan misc ditolak: " + Bsl.describeType(r.type));
+        }
+        sendChunks(bsl, misc, 1024, cb, 80, 95);
+        endData(bsl, 60000);
+    }
+
     private boolean canFlash(PacParser.Entry e) {
         return e.hasData() && e.size > 0 && !isFdlEntry(e) && e.checkFlag != 0;
     }
@@ -241,7 +277,7 @@ public class FlashEngine {
             String id = (e.id + " " + e.idName).toUpperCase(Locale.ROOT);
             if (id.contains("FDL" + stage)) return e;
         }
-        // fallback: cari berdasar nama file
+
         for (PacParser.Entry e : pac.entries) {
             String n = e.name.toUpperCase(Locale.ROOT);
             if (n.contains("FDL" + stage)) return e;
@@ -249,9 +285,6 @@ public class FlashEngine {
         return null;
     }
 
-    // =========================================================== transfer
-
-    /** Sumber data streaming untuk satu entri PAC — tidak memuat ke RAM. */
     private static final class EntrySrc implements java.io.Closeable {
         final RandomAccessFile raf;
         final long start;
@@ -278,10 +311,6 @@ public class FlashEngine {
         }
     }
 
-    /**
-     * Checksum sum32 (kata big-endian, sisa di-pad nol) secara inkremental.
-     * Setara {@link Bsl#sum32} tapi bisa dipakai untuk partisi > 4 GiB.
-     */
     static final class Sum32 {
         private long sum = 0;
         private final byte[] rem = new byte[4];
@@ -321,11 +350,6 @@ public class FlashEngine {
 
     private static final int COPY_BUF = 1 << 20;
 
-    /**
-     * START_DATA mode DownloadByID.
-     * <= 4 GiB : [NAME:72][SIZE:4 LE][CHECKSUM:4 BE]
-     * >  4 GiB : [NAME:72][SIZE_LO:4 LE][SIZE_HI:4 LE][RESERVED:8]  (tanpa checksum)
-     */
     private static byte[] namedStart(String name, long size, long checksum) {
         if (size > 0xFFFFFFFFL) {
             byte[] p = new byte[72 + 16];
@@ -491,8 +515,6 @@ public class FlashEngine {
         }
     }
 
-    // ======================================================== repartition
-
     private void repartition(Bsl bsl, PacParser.Pac pac, Cb cb) throws IOException {
         List<PacParser.Entry> parts = new ArrayList<>();
         for (PacParser.Entry e : pac.entries) {
@@ -519,9 +541,6 @@ public class FlashEngine {
                 + (r == null ? "tanpa balasan" : Bsl.describeType(r.type)));
     }
 
-    // ============================================================== READ
-
-    /** Baca isi partisi dari perangkat dan simpan ke file. */
     public File readPartition(UsbTransport t, String partName, long sizeBytes,
                               File outFile, Cb cb) throws IOException {
         Bsl bsl = new Bsl(t);
@@ -561,7 +580,6 @@ public class FlashEngine {
         return outFile;
     }
 
-    /** Baca UID chip (0x1A). */
     public String readChipUid(UsbTransport t, Cb cb) throws IOException {
         Bsl bsl = new Bsl(t);
         t.setIoTimeout(3000);
@@ -575,7 +593,6 @@ public class FlashEngine {
         return sb.toString();
     }
 
-    /** Baca info BSL/versi dari balasan handshake. */
     public String readBslVersion(UsbTransport t) throws IOException {
         Bsl bsl = new Bsl(t);
         t.setIoTimeout(3000);
@@ -584,8 +601,6 @@ public class FlashEngine {
         if (r == null) return "(tanpa balasan versi)";
         return Bsl.printable(r.payload);
     }
-
-    // ============================================================= util
 
     static byte[] concat(byte[]... arrs) {
         int n = 0;

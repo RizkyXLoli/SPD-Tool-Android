@@ -11,18 +11,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
-/**
- * Parser container firmware .pac (Unisoc / Spreadtrum).
- *
- * Layout on-disk (little endian, packed 1-byte):
- *   [0]            PacHeader  2124 byte
- *   [fileOffset]   PacFileEntry[fileCount]  2580 byte / entri
- *   [xmlStart]     blok XML konfigurasi (UTF-8 atau UTF-16LE)
- *   [dataOffset]   blob biner tiap entri (tidak dikompresi)
- *
- * Format diambil dari BinPack.h (SPD Flash Tool) melalui referensi clean-room
- * upac / uflash. Tidak ada kode vendor yang dipakai.
- */
 public class PacParser {
 
     public static final long PAC_MAGIC = 0xFFFAFFFAL;
@@ -41,7 +29,7 @@ public class PacParser {
         public int omitFlag;
         public int addrCount;
         public long[] addr = new long[5];
-        // dari XML
+
         public String idName = "";
         public String type = "";
         public long baseAddress = -1;
@@ -114,8 +102,6 @@ public class PacParser {
         }
     }
 
-    // ------------------------------------------------------------------ parse
-
     public static Pac parse(File f) throws IOException {
         Pac p = new Pac();
         p.file = f;
@@ -148,7 +134,6 @@ public class PacParser {
                         + "), file bukan firmware PAC Unisoc");
             }
 
-            // --- tabel entri
             if (p.fileCount > 0 && p.fileCount < 4096 && p.fileOffset > 0
                     && (long) p.fileOffset + (long) p.fileCount * ENTRY_SIZE <= raf.length()) {
                 raf.seek(p.fileOffset);
@@ -161,8 +146,7 @@ public class PacParser {
                     en.id = utf16(e, 4, 256);
                     en.name = utf16(e, 516, 256);
                     en.version = utf16(e, 1028, 256);
-                    // size & dataOffset adalah 64-bit: high dword di 1532/1536,
-                    // low dword di 1540/1552. PAC > 4 GiB butuh high dword.
+
                     en.size = ((long) eb.getInt(1532) & 0xFFFFFFFFL) << 32
                             | (eb.getInt(1540) & 0xFFFFFFFFL);
                     en.fileFlag = eb.getInt(1544);
@@ -178,9 +162,6 @@ public class PacParser {
                 }
             }
 
-            // --- blok XML
-            // PAC lama menaruh XML tepat setelah tabel entri. PAC baru (mis. X6725)
-            // menyimpannya sebagai entri tersendiri dengan fileFlag == 2 di akhir file.
             Entry xmlEntry = null;
             for (Entry en : p.entries) {
                 if (en.fileFlag == 2 && en.size > 0) { xmlEntry = en; break; }
@@ -215,7 +196,6 @@ public class PacParser {
         return p;
     }
 
-    /** Baca blob data satu entri ke byte[]. */
     public static byte[] readEntryData(Pac pac, Entry en) throws IOException {
         if (!en.hasData()) return new byte[0];
         if (en.size > 512L * 1024 * 1024) throw new IOException("Entri terlalu besar: " + en.label());
@@ -232,8 +212,6 @@ public class PacParser {
             try { raf.close(); } catch (IOException ignored) { }
         }
     }
-
-    // ------------------------------------------------------------------ util
 
     static String utf16(byte[] buf, int off, int chars) {
         StringBuilder sb = new StringBuilder(chars);
@@ -306,13 +284,6 @@ public class PacParser {
         return n + " B";
     }
 
-    // ------------------------------------------------------------------- xml
-
-    /**
-     * Gabungkan metadata XML ke entri PAC. Parser dibuat toleran: beberapa
-     * generasi PAC memakai BMAConfig/ProductList/Product, ada juga yang
-     * memakai node Product langsung atau nama atribut berbeda.
-     */
     static void mergeXml(Pac p) {
         if (p.xml == null || p.xml.isEmpty()) return;
         String xml = p.xml;
@@ -382,7 +353,7 @@ public class PacParser {
                 ev = x.next();
             }
         } catch (Exception ignored) {
-            // XML rusak / tak dikenal: tetap jalan dengan data header saja
+
         }
     }
 
@@ -396,8 +367,6 @@ public class PacParser {
         }
         return null;
     }
-
-    // ------------------------------------------------------------------ crc16
 
     private static final int[] CRC_TABLE = {
             0x0000, 0xC0C1, 0xC181, 0x0140, 0xC301, 0x03C0, 0x0280, 0xC241,
@@ -434,7 +403,6 @@ public class PacParser {
             0x8201, 0x42C0, 0x4380, 0x8341, 0x4100, 0x81C1, 0x8081, 0x4040
     };
 
-    /** CRC-16 poly 0x8005 (reflected), identik dengan crc16.c SPD Flash Tool. */
     public static int crc16(int crc, byte[] data, int off, int len) {
         for (int i = off; i < off + len; i++) {
             crc = (crc >>> 8) ^ CRC_TABLE[(crc ^ (data[i] & 0xFF)) & 0xFF];
@@ -465,7 +433,7 @@ public class PacParser {
                 while (done < len) {
                     int n = raf.read(buf, 0, (int) Math.min(buf.length, len - done));
                     if (n <= 0) break;
-                    // field crc2 (offset 2122..2123) dianggap nol saat verifikasi
+
                     for (int i = 0; i < n; i++) {
                         long pos = done + i;
                         if (pos == 2122 || pos == 2123) buf[i] = 0;
