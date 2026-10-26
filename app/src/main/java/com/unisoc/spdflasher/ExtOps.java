@@ -410,4 +410,429 @@ public class ExtOps {
         }
         return Bsl.printable(r.payload);
     }
+
+    // ==================== peta partisi (menu Dump) ====================
+
+    /** Satu entri peta partisi. */
+    public static class Part {
+        public final int id;
+        public final String name;
+        public final long size;   // byte, 0 = tidak diketahui
+
+        public Part(int id, String name, long size) {
+            this.id = id;
+            this.name = name;
+            this.size = size;
+        }
+
+        public String label() {
+            return String.format("%3d  %-22s %10s", id, name, size > 0 ? PacParser.human(size) : "?");
+        }
+
+        @Override
+        public String toString() {
+            return name;
+        }
+    }
+
+    private File workDir;
+
+    /** Direktori kerja untuk file sementara (patch offset / dump besar). */
+    public void setWorkDir(File d) {
+        this.workDir = d;
+    }
+
+    private File tmpFile(String tag) throws IOException {
+        File dir = workDir;
+        if (dir == null) dir = new File("/data/local/tmp");
+        if (!dir.isDirectory() && !dir.mkdirs()) {
+            throw new IOException("direktori kerja tidak bisa dibuat: " + dir);
+        }
+        return new File(dir, "spd_" + tag + "_" + System.currentTimeMillis() + ".bin");
+    }
+
+    /**
+     * Peta partisi. Sumber utama GPT (partisi semu "user_partition"), fallback
+     * BSL_CMD_READ_PARTITION — sama seperti partition_list() di spd_dump v36.
+     */
+    public java.util.List<Part> listPartitions() throws IOException {
+        java.util.List<Part> out = new java.util.ArrayList<>();
+        try {
+            byte[] gpt = readPartition("user_partition", 32 * 1024);
+            if (parseGpt(gpt, out) && !out.isEmpty()) {
+                log("Peta partisi: GPT (" + out.size() + " entri)");
+                return out;
+            }
+        } catch (IOException e) {
+            log("GPT tidak tersedia (" + e.getMessage() + ") — pakai READ_PARTITION");
+        }
+        out.clear();
+        Bsl.Resp r = bsl.transact(Bsl.CMD_READ_PARTITION, new byte[0], 15000);
+        if (r == null) throw new IOException("READ_PARTITION: timeout");
+        if (r.type != Bsl.REP_READ_PARTITION) {
+            throw new IOException("READ_PARTITION: " + Bsl.describeType(r.type));
+        }
+        parseSprdTable(r.payload, out);
+        if (out.isEmpty()) throw new IOException("tabel partisi kosong / format tidak dikenal");
+        log("Peta partisi: BSL_READ_PARTITION (" + out.size() + " entri)");
+        return out;
+    }
+
+    private static long u64(byte[] d, int o) {
+        return (u32(d, o) & 0xFFFFFFFFL) | ((u32(d, o + 4) & 0xFFFFFFFFL) << 32);
+    }
+
+    private static String utf16le(byte[] d, int off, int chars) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < chars; i++) {
+            int c = (d[off + i * 2] & 0xFF) | ((d[off + i * 2 + 1] & 0xFF) << 8);
+            if (c == 0) break;
+            sb.append((char) c);
+        }
+        return sb.toString().trim();
+    }
+
+    /** Parse tabel GPT 32 KiB (signature "EFI PART", entri 128 byte, nama UTF-16LE @+56). */
+    private static boolean parseGpt(byte[] b, java.util.List<Part> out) {
+        if (b.length < 1024) return false;
+        int hdr = -1;
+        for (int off = 0; off + 92 <= b.length && off <= 4096; off += 512) {
+            if (b[off] == 'E' && b[off + 1] == 'F' && b[off + 2] == 'I' && b[off + 3] == ' ') {
+                hdr = off;
+                break;
+            }
+        }
+        if (hdr < 0) return false;
+        long entLba = u64(b, hdr + 72);
+        long num = u32(b, hdr + 80);
+        long esz = u32(b, hdr + 84);
+        if (esz < 128 || num <= 0 || num > 1024) return false;
+        long entOff = entLba * 512L;
+        if (entOff < 0 || entOff >= b.length) return false;
+        int n = (int) Math.min(num, (b.length - entOff) / esz);
+        for (int i = 0; i < n; i++) {
+            int o = (int) (entOff + i * esz);
+            boolean empty = true;
+            for (int k = 0; k < 16; k++) {
+                if (b[o + k] != 0) {
+                    empty = false;
+                    break;
+                }
+            }
+            if (empty) continue;
+            long first = u64(b, o + 32);
+            long last = u64(b, o + 40);
+            String name = utf16le(b, o + 56, 36);
+            if (name.isEmpty()) name = "part" + i;
+            out.add(new Part(i, name, last >= first ? (last - first + 1) * 512L : 0));
+        }
+        return !out.isEmpty();
+    }
+
+    /** Parse tabel internal: entri 0x4C byte, nama UTF-16LE 36 char, ukuran u32 @0x48. */
+    private void parseSprdTable(byte[] p, java.util.List<Part> out) {
+        int n = p.length / 0x4C;
+        if (n <= 0) return;
+        int divisor = 10;
+        for (int i = 0; i < n; i++) {
+            long v = u32(p, i * 0x4C + 0x48);
+            while (divisor > 0 && (v >> divisor) == 0) divisor--;
+        }
+        for (int i = 0; i < n; i++) {
+            int o = i * 0x4C;
+            String name = utf16le(p, o, 36);
+            long v = u32(p, o + 0x48);
+            long size = divisor >= 20 ? 0 : v << (20 - divisor);
+            out.add(new Part(i, name.isEmpty() ? "part" + i : name, size));
+        }
+    }
+
+    /** Ukuran pasti partisi (info "<name>_size"), fallback ke ukuran peta. */
+    public long sizeOf(Part p) {
+        try {
+            long s = partitionSize(p.name);
+            if (s > 0) return s;
+        } catch (IOException ignored) {
+        }
+        return p.size;
+    }
+
+    /** Tulis peta partisi ke XML gaya spd_dump (&lt;Partitions&gt;). */
+    public void exportPartitionXml(java.util.List<Part> list, File out) throws IOException {
+        try (java.io.PrintWriter w = new java.io.PrintWriter(out, "UTF-8")) {
+            w.println("<Partitions>");
+            for (Part p : list) {
+                w.println("    <Partition id=\"" + p.name + "\" size=\"" + (p.size / (1024 * 1024)) + "\"/>");
+            }
+            w.println("</Partitions>");
+        }
+        log("XML partisi: " + out.getAbsolutePath());
+    }
+
+    /** Repartisi dari daftar partisi (entri 0x4C byte, ukuran u32 @0x48). */
+    public int repartition(java.util.List<Part> list) throws IOException {
+        int n = list.size();
+        if (n == 0) throw new IOException("daftar partisi kosong");
+        long max = 0;
+        for (Part p : list) max = Math.max(max, p.size);
+        int divisor = 10;
+        while (divisor > 0 && (max >> divisor) == 0) divisor--;
+        byte[] buf = new byte[n * 0x4C];
+        for (int i = 0; i < n; i++) {
+            Part p = list.get(i);
+            int o = i * 0x4C;
+            System.arraycopy(Bsl.name72(p.name), 0, buf, o, 72);
+            put32(buf, o + 0x48, p.size >> (20 - divisor));
+        }
+        Bsl.Resp r = bsl.transact(Bsl.CMD_REPARTITION, buf, 30000);
+        if (r == null) throw new IOException("REPARTITION: timeout");
+        if (!bsl.isAck(r)) throw new IOException("REPARTITION: " + Bsl.describeType(r.type));
+        log("Repartisi: " + n + " entri dikirim");
+        return n;
+    }
+
+    // ==================== baca dengan offset ====================
+
+    /** Baca [offset, offset+size) dari partisi ke memori (READ_START size = offset+size). */
+    public byte[] readRange(String name, long offset, long size) throws IOException {
+        if (size > MAX_INMEM) throw new IOException("range terlalu besar untuk buffer (" + size + ")");
+        byte[] out = new byte[(int) size];
+        ack(bsl.transact(Bsl.CMD_READ_START, selPayload(name, offset + size), 30000),
+                "READ_START(" + name + ")");
+        long off = 0;
+        while (off < size) {
+            int n = (int) Math.min(READ_CHUNK, size - off);
+            Bsl.Resp r = bsl.transact(Bsl.CMD_READ_MIDST,
+                    cat(Bsl.le32(n), Bsl.le32(offset + off)), 30000);
+            if (r == null) throw new IOException("READ_MIDST timeout @0x" + Long.toHexString(offset + off));
+            if (r.type != Bsl.REP_READ_DATA && r.type != Bsl.REP_ACK) {
+                throw new IOException("READ_MIDST: " + Bsl.describeType(r.type));
+            }
+            int got = Math.min(r.payload.length, n);
+            if (got > 0) System.arraycopy(r.payload, 0, out, (int) off, got);
+            off += n;
+            prog((int) (100L * off / Math.max(1, size)), "baca " + name);
+        }
+        bsl.transact(Bsl.CMD_READ_END, new byte[0], 10000);
+        return out;
+    }
+
+    /** Dump rentang [offset, offset+size) partisi langsung ke file. */
+    public void dumpRange(String name, long offset, long size, File out) throws IOException {
+        try (FileOutputStream fos = new FileOutputStream(out)) {
+            ack(bsl.transact(Bsl.CMD_READ_START, selPayload(name, offset + size), 30000),
+                    "READ_START(" + name + ")");
+            long off = 0;
+            byte[] zero = new byte[READ_CHUNK];
+            while (off < size) {
+                int n = (int) Math.min(READ_CHUNK, size - off);
+                Bsl.Resp r = bsl.transact(Bsl.CMD_READ_MIDST,
+                        cat(Bsl.le32(n), Bsl.le32(offset + off)), 30000);
+                if (r == null) throw new IOException("READ_MIDST timeout @0x" + Long.toHexString(offset + off));
+                if (r.type != Bsl.REP_READ_DATA && r.type != Bsl.REP_ACK) {
+                    throw new IOException("READ_MIDST: " + Bsl.describeType(r.type));
+                }
+                int got = Math.min(r.payload.length, n);
+                if (got > 0) fos.write(r.payload, 0, got);
+                if (got < n) fos.write(zero, 0, n - got);
+                off += n;
+                prog((int) (100L * off / Math.max(1, size)), "dump " + name);
+            }
+            bsl.transact(Bsl.CMD_READ_END, new byte[0], 10000);
+        }
+    }
+
+    /** Dump satu partisi penuh ke file (nama file = <name>.img di direktori out). */
+    public File dumpPartitionTo(String name, File dir) throws IOException {
+        long size = partitionSize(name);
+        File out = new File(dir, name.replaceAll("[^A-Za-z0-9._-]", "_") + ".img");
+        log("Dump " + name + " (" + PacParser.human(size) + ") -> " + out.getAbsolutePath());
+        dumpRange(name, 0, size, out);
+        log("Selesai " + name + ": " + PacParser.human(out.length()));
+        return out;
+    }
+
+    // ==================== tulis di offset (w_mem_to_part_offset) ====================
+
+    /**
+     * Patch byte pada offset partisi. Sama seperti w_mem_to_part_offset():
+     * partisi dibaca utuh, dipatch, lalu ditulis kembali.
+     */
+    public void writeAtOffset(String name, long offset, byte[] data) throws IOException {
+        long total = partitionSize(name);
+        if (offset < 0 || offset + data.length > total) {
+            throw new IOException("offset+data (" + (offset + data.length)
+                    + ") melewati ukuran partisi " + name + " (" + total + ")");
+        }
+        if (total <= MAX_INMEM) {
+            byte[] buf = readPartition(name, total);
+            System.arraycopy(data, 0, buf, (int) offset, data.length);
+            writePartition(name, buf);
+        } else {
+            File tmp = tmpFile("patch");
+            try {
+                dumpPartition(name, total, tmp);
+                try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(tmp, "rw")) {
+                    raf.seek(offset);
+                    raf.write(data);
+                }
+                writePartition(name, tmp);
+            } finally {
+                if (!tmp.delete()) log("peringatan: gagal hapus " + tmp.getAbsolutePath());
+            }
+        }
+        log("Patch " + name + " @0x" + Long.toHexString(offset) + " (" + data.length + " byte)");
+    }
+
+    // ==================== exploit / UBL (e_*) ====================
+
+    private static byte[] aes128Ecb(byte[] key16, byte[] data) throws IOException {
+        try {
+            javax.crypto.Cipher c = javax.crypto.Cipher.getInstance("AES/ECB/NoPadding");
+            c.init(javax.crypto.Cipher.ENCRYPT_MODE,
+                    new javax.crypto.spec.SecretKeySpec(key16, "AES"));
+            return c.doFinal(data);
+        } catch (Exception e) {
+            throw new IOException("AES-128 ECB: " + e.getMessage());
+        }
+    }
+
+    /**
+     * UBL / unlock bootloader (do_e_bl): E_BL -> HUK (payload XOR 0x55+i) ->
+     * AES-128-ECB("VerifiedBoot-UNLOCK" 64 byte) -> tulis 64 byte ke miscdata@0x2000.
+     */
+    public String unlockBootloader() throws IOException {
+        Bsl.Resp r = bsl.transact(Bsl.CMD_E_BL, new byte[0], 20000);
+        if (r == null) throw new IOException("E_BL: timeout");
+        if (r.type != Bsl.REP_E_BL) {
+            throw new IOException("E_BL: " + Bsl.describeType(r.type) + " " + hexOf(r.payload));
+        }
+        byte[] huk = new byte[r.payload.length];
+        for (int i = 0; i < huk.length; i++) huk[i] = (byte) (r.payload[i] ^ (0x55 + i));
+        log("HUK (" + huk.length + " byte): " + hexOf(huk));
+        if (huk.length < 16) throw new IOException("E_BL: respons terlalu pendek (" + huk.length + " byte)");
+        byte[] pt = new byte[64];
+        byte[] magic = "VerifiedBoot-UNLOCK".getBytes("US-ASCII");
+        System.arraycopy(magic, 0, pt, 0, magic.length);
+        byte[] ct = aes128Ecb(java.util.Arrays.copyOf(huk, 16), pt);
+        log("Encrypted: " + hexOf(ct));
+        writeAtOffset("miscdata", 0x2000, ct);
+        log("UBL: blok unlock ditulis ke miscdata@0x2000");
+        return "OK";
+    }
+
+    /** ab: 0 = trustos, 1 = trustos_a, 2 = trustos_b. */
+    private static byte[] pwnPayload(int ab) {
+        byte[] d = new byte[32];
+        String nm = ab > 0 ? "trustos_" + (char) ('a' + ab - 1) : "trustos";
+        byte[] nb = nm.getBytes();
+        System.arraycopy(nb, 0, d, 0, Math.min(nb.length, 32));
+        for (int i = 0; i < 32; i++) d[i] ^= (byte) (0x65 + i);
+        return d;
+    }
+
+    /** e_checkpwn: cek apakah write-protect bisa ditembus (resp 7 = rentan). */
+    public String checkPwn(int ab) throws IOException {
+        Bsl.Resp r = bsl.transact(Bsl.CMD_E_CHECKPWN, pwnPayload(ab), 20000);
+        if (r == null) throw new IOException("E_CHECKPWN: timeout");
+        if (!bsl.isAck(r)) {
+            return "checkpwn: " + Bsl.describeType(r.type) + " " + hexOf(r.payload);
+        }
+        long code = r.payload.length >= 4 ? u32(r.payload, 0) : -1;
+        return "checkpwn resp=" + code + " data=" + hexOf(r.payload) + (code == 7 ? " (RENTAN)" : "");
+    }
+
+    /** e_pwn: jalankan exploit write-protect bila checkpwn melaporkan 7. */
+    public String doPwn(int ab) throws IOException {
+        Bsl.Resp c = bsl.transact(Bsl.CMD_E_CHECKPWN, pwnPayload(ab), 20000);
+        if (c == null) throw new IOException("E_CHECKPWN: timeout");
+        if (!bsl.isAck(c)) throw new IOException("E_CHECKPWN: " + Bsl.describeType(c.type));
+        long code = c.payload.length >= 4 ? u32(c.payload, 0) : -1;
+        if (code != 7) return "tidak rentan (resp=" + code + ")";
+        Bsl.Resp r = bsl.transact(Bsl.CMD_E_PWN, pwnPayload(ab), 30000);
+        if (r == null) throw new IOException("E_PWN: timeout");
+        return (bsl.isAck(r) ? "PWN OK " : "PWN gagal " + Bsl.describeType(r.type)) + " " + hexOf(r.payload);
+    }
+
+    /** e_readmem: baca memori mentah ke file (addr/len u32 LE). */
+    public void readMemory(long addr, long len, File out) throws IOException {
+        try (FileOutputStream fos = new FileOutputStream(out)) {
+            long done = 0;
+            while (done < len) {
+                int n = (int) Math.min(CHUNK, len - done);
+                Bsl.Resp r = bsl.transact(Bsl.CMD_E_READ_MEM,
+                        cat(Bsl.le32(addr + done), Bsl.le32(n)), 30000);
+                if (r == null) throw new IOException("E_READ_MEM: timeout @0x" + Long.toHexString(addr + done));
+                if (r.type != Bsl.REP_E_READ_MEM) {
+                    throw new IOException("E_READ_MEM: " + Bsl.describeType(r.type));
+                }
+                int got = Math.min(r.payload.length, n);
+                if (got > 0) fos.write(r.payload, 0, got);
+                done += got;
+                prog((int) (100L * done / Math.max(1, len)), "baca memori");
+                if (got != n) break;
+            }
+            log("e_readmem: addr=0x" + Long.toHexString(addr) + " target=0x" + Long.toHexString(len)
+                    + " read=0x" + Long.toHexString(done) + " -> " + out.getAbsolutePath());
+        }
+    }
+
+    // ==================== info tambahan ====================
+
+    public long rpmbPageCount() throws IOException {
+        Bsl.Resp r = bsl.transact(Bsl.CMD_E_RPMB_PAGECOUNT, new byte[0], 15000);
+        if (r == null) throw new IOException("E_RPMB_PAGECOUNT: timeout");
+        if (r.type != Bsl.REP_E_RPMB_PAGECOUNT) {
+            throw new IOException("E_RPMB_PAGECOUNT: " + Bsl.describeType(r.type));
+        }
+        return r.payload.length >= 4 ? u32(r.payload, 0) : -1;
+    }
+
+    public long rpmbCounter() throws IOException {
+        Bsl.Resp r = bsl.transact(Bsl.CMD_E_RPMB_COUNTER, new byte[0], 15000);
+        if (r == null) throw new IOException("E_RPMB_COUNTER: timeout");
+        if (r.type != Bsl.REP_E_RPMB_COUNTER) {
+            throw new IOException("E_RPMB_COUNTER: " + Bsl.describeType(r.type));
+        }
+        return r.payload.length >= 4 ? u32(r.payload, 0) : -1;
+    }
+
+    public String emmcCid() throws IOException {
+        Bsl.Resp r = bsl.transact(Bsl.CMD_EMMC_CID, new byte[0], 15000);
+        if (r == null) throw new IOException("EMMC_CID: timeout");
+        if (r.type != Bsl.REP_EMMC_CID_DATA) {
+            throw new IOException("EMMC_CID: " + Bsl.describeType(r.type));
+        }
+        return hexOf(r.payload);
+    }
+
+    public String flashUid() throws IOException {
+        Bsl.Resp r = bsl.transact(Bsl.CMD_READ_FLASH_UID, new byte[0], 15000);
+        if (r == null) throw new IOException("READ_FLASH_UID: timeout");
+        if (r.type != Bsl.REP_READ_FLASH_UID) {
+            throw new IOException("READ_FLASH_UID: " + Bsl.describeType(r.type));
+        }
+        return hexOf(r.payload);
+    }
+
+    /** pactime: 8 byte @0x81400 miscdata, FILETIME 100ns -> unix detik. */
+    public long pactime() throws IOException {
+        byte[] d = readRange("miscdata", 0x81400, 8);
+        long t = (u32(d, 0) & 0xFFFFFFFFL) | ((u32(d, 4) & 0xFFFFFFFFL) << 32);
+        long unix = t == 0 ? 0 : (t / 10000000L) - 11644473600L;
+        log("pactime = 0x" + Long.toHexString(t) + " (unix = " + unix + ")");
+        return t;
+    }
+
+    /** firstmode: tulis (mode + 0x53464D00) u32 ke miscdata@0x2420. */
+    public void setFirstMode(int mode) throws IOException {
+        writeAtOffset("miscdata", 0x2420, Bsl.le32((mode & 0xFFFFFFFFL) + 0x53464D00L));
+        log("firstmode " + mode + " ditulis ke miscdata@0x2420");
+    }
+
+    private static String hexOf(byte[] d) {
+        StringBuilder sb = new StringBuilder();
+        for (byte b : d) sb.append(String.format("%02X", b));
+        return sb.toString();
+    }
 }

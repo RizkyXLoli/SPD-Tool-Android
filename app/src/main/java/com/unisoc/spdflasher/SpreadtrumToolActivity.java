@@ -190,7 +190,7 @@ public class SpreadtrumToolActivity extends Activity {
         root.addView(title);
 
         TextView sub = new TextView(this);
-        sub.setText("Dump / tulis / patch partisi, slot A-B, dm-verity, AVB, reboot");
+        sub.setText("Dump partisi (pilih) / tulis / patch, UBL, e_pwn, RPMB, slot A-B, verity, AVB, reboot");
         sub.setTextColor(0xFF9AA5B1);
         sub.setTextSize(11);
         sub.setPadding(0, dp(2), 0, dp(10));
@@ -211,33 +211,64 @@ public class SpreadtrumToolActivity extends Activity {
         cbSkipFdl.setTextSize(11);
         root.addView(cbSkipFdl);
 
-        root.addView(row(
+        LinearLayout menu = new LinearLayout(this);
+        menu.setOrientation(LinearLayout.VERTICAL);
+
+        menu.addView(row(
                 button("Info Chip", v -> actInfoChip()),
                 button("Info Partisi", v -> actInfoPart())
         ));
-        root.addView(row(
-                button("Dump Partisi", v -> actDump()),
-                button("Tulis Partisi", v -> actWrite())
+        menu.addView(row(
+                button("Daftar Partisi", v -> actListParts()),
+                button("Dump (pilih)", v -> actDumpPick())
         ));
-        root.addView(row(
+        menu.addView(row(
+                button("Dump Semua", v -> actDumpAll()),
+                button("Dump @offset", v -> actDumpRange())
+        ));
+        menu.addView(row(
+                button("Tulis Partisi", v -> actWrite()),
+                button("Tulis @offset", v -> actWriteAt())
+        ));
+        menu.addView(row(
                 button("Hapus Partisi", v -> actErase()),
                 button("Patch Byte", v -> actPatch())
         ));
-        root.addView(row(
+        menu.addView(row(
+                button("UBL / Unlock BL", v -> actUbl()),
+                button("Cek PWN", v -> actCheckPwn())
+        ));
+        menu.addView(row(
+                button("ePWN", v -> actPwn()),
+                button("Baca Memori", v -> actReadMem())
+        ));
+        menu.addView(row(
                 button("Slot A", v -> actSlot('a')),
                 button("Slot B", v -> actSlot('b'))
         ));
-        root.addView(row(
+        menu.addView(row(
                 button("Verity OFF", v -> actVerity(true)),
                 button("Verity ON", v -> actVerity(false))
         ));
-        root.addView(row(
+        menu.addView(row(
                 button("AVB OFF", v -> actAvb()),
-                button("Reboot System", v -> actReboot("system"))
+                button("First Mode", v -> actFirstMode())
         ));
-        root.addView(row(
-                button("Reboot Fastboot", v -> actReboot("fastboot")),
-                button("Reboot Recovery", v -> actReboot("recovery"))
+        menu.addView(row(
+                button("RPMB Info", v -> actRpmb()),
+                button("EMMC CID", v -> actCid())
+        ));
+        menu.addView(row(
+                button("PACTIME", v -> actPacTime()),
+                button("Export XML", v -> actExportXml())
+        ));
+        menu.addView(row(
+                button("Reboot System", v -> actReboot("system")),
+                button("Reboot Fastboot", v -> actReboot("fastboot"))
+        ));
+        menu.addView(row(
+                button("Reboot Recovery", v -> actReboot("recovery")),
+                button("Flash UID", v -> actFlashUid())
         ));
 
         Button btnStop = button("Batal / Stop", v -> {
@@ -250,7 +281,14 @@ public class SpreadtrumToolActivity extends Activity {
             tvStage.setText("membatalkan");
         });
         btnStop.setTextColor(0xFFFF8A80);
-        root.addView(row(btnStop));
+        menu.addView(row(btnStop));
+
+        ScrollView menuScroll = new ScrollView(this);
+        menuScroll.addView(menu);
+        LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 0.9f);
+        mlp.topMargin = dp(2);
+        root.addView(menuScroll, mlp);
 
         progress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         progress.setMax(100);
@@ -534,6 +572,7 @@ public class SpreadtrumToolActivity extends Activity {
                 FlashEngine.Session s = eng.openFdl(t, opener, pac, false,
                         cbSkipFdl.isChecked(), cb);
                 ExtOps x = new ExtOps(s.bsl, extCb);
+                x.setWorkDir(dumpDir());
                 op.run(x);
                 if (resetAfter) {
                     append("Reboot perangkat...");
@@ -579,17 +618,270 @@ public class SpreadtrumToolActivity extends Activity {
         });
     }
 
-    private void actDump() {
-        ask("Dump Partisi", "nama partisi (mis. boot, super)", "boot", name -> {
+    // ==================== peta partisi / dump ====================
+
+    private java.util.List<ExtOps.Part> parts;
+
+    private interface PartSink {
+        void accept(java.util.List<ExtOps.Part> sel);
+    }
+
+    private File dumpDir() {
+        File dir = getExternalFilesDir("dump");
+        if (dir == null) dir = new File(getFilesDir(), "dump");
+        if (!dir.isDirectory() && !dir.mkdirs()) append("peringatan: gagal buat " + dir);
+        return dir;
+    }
+
+    private void actListParts() {
+        runOp("Daftar Partisi", x -> {
+            java.util.List<ExtOps.Part> list = x.listPartitions();
+            parts = list;
+            append(String.format("%3s  %-22s %10s", "#", "NAMA", "UKURAN"));
+            for (ExtOps.Part p : list) append(p.label());
+            append("Total: " + list.size() + " partisi");
+        }, false);
+    }
+
+    private void showPartPicker(String title, PartSink sink) {
+        final java.util.List<ExtOps.Part> src = parts;
+        if (src == null || src.isEmpty()) {
+            toast("Muat daftar partisi dulu (Daftar Partisi)");
+            return;
+        }
+        String[] items = new String[src.size()];
+        for (int i = 0; i < src.size(); i++) items[i] = src.get(i).label();
+        final boolean[] checked = new boolean[src.size()];
+        new AlertDialog.Builder(this)
+                .setTitle(title)
+                .setMultiChoiceItems(items, checked, (d, which, isChecked) -> checked[which] = isChecked)
+                .setPositiveButton("Jalankan", (d, w) -> {
+                    java.util.List<ExtOps.Part> sel = new java.util.ArrayList<>();
+                    for (int i = 0; i < src.size(); i++) if (checked[i]) sel.add(src.get(i));
+                    if (sel.isEmpty()) {
+                        toast("Tidak ada partisi dipilih");
+                        return;
+                    }
+                    sink.accept(sel);
+                })
+                .setNeutralButton("Semua", (d, w) ->
+                        sink.accept(new java.util.ArrayList<>(src)))
+                .setNegativeButton("Batal", null)
+                .show();
+    }
+
+    private void ensureParts(Runnable then) {
+        if (parts != null && !parts.isEmpty()) {
+            then.run();
+            return;
+        }
+        runOp("Daftar Partisi", x -> {
+            parts = x.listPartitions();
+            ui.post(then);
+        }, false);
+    }
+
+    private void actDumpPick() {
+        ensureParts(() -> showPartPicker("Dump partisi (pilih)", sel ->
+                runOp("Dump " + sel.size() + " partisi", x -> {
+                    File dir = dumpDir();
+                    x.setWorkDir(dir);
+                    for (ExtOps.Part p : sel) x.dumpPartitionTo(p.name, dir);
+                    append("Semua dump selesai di " + dir.getAbsolutePath());
+                }, false)));
+    }
+
+    private void actDumpAll() {
+        ensureParts(() -> showPartPicker("Dump SEMUA partisi", sel -> confirm(
+                "Dump " + sel.size() + " partisi ke " + dumpDir().getAbsolutePath() + "?",
+                () -> runOp("Dump semua partisi", x -> {
+                    File dir = dumpDir();
+                    x.setWorkDir(dir);
+                    for (ExtOps.Part p : sel) {
+                        try {
+                            x.dumpPartitionTo(p.name, dir);
+                        } catch (Exception e) {
+                            append("lewat " + p.name + ": " + e.getMessage());
+                        }
+                    }
+                    append("Selesai. Direktori: " + dir.getAbsolutePath());
+                }, false))));
+    }
+
+    private void actDumpRange() {
+        ask("Dump @offset", "nama partisi (mis. boot)", "boot", name -> {
             if (name.isEmpty()) return;
-            runOp("Dump " + name, x -> {
-                long sz = x.partitionSize(name);
-                File dir = getExternalFilesDir(null);
-                if (dir == null) dir = getFilesDir();
-                File out = new File(dir, name.replaceAll("[^A-Za-z0-9._-]", "_") + ".img");
-                append("Membaca " + name + " (" + PacParser.human(sz) + ") -> " + out.getAbsolutePath());
-                x.dumpPartition(name, sz, out);
-                append("Selesai: " + out.getAbsolutePath() + " (" + PacParser.human(out.length()) + ")");
+            ask("Offset", "offset byte (hex 0x.. atau desimal)", "0", offs ->
+                    ask("Size", "ukuran byte (hex/desimal)", "1048576", szs -> {
+                        long off, size;
+                        try {
+                            off = parseNum(offs);
+                            size = parseNum(szs);
+                        } catch (Exception e) {
+                            toast("offset/size tidak valid");
+                            return;
+                        }
+                        if (size <= 0) {
+                            toast("size harus > 0");
+                            return;
+                        }
+                        runOp("Dump " + name + " @0x" + Long.toHexString(off), x -> {
+                            File dir = dumpDir();
+                            x.setWorkDir(dir);
+                            File out = new File(dir, name.replaceAll("[^A-Za-z0-9._-]", "_")
+                                    + "_" + off + ".img");
+                            x.dumpRange(name, off, size, out);
+                            append("Selesai: " + out.getAbsolutePath()
+                                    + " (" + PacParser.human(out.length()) + ")");
+                        }, false);
+                    }));
+        });
+    }
+
+    private void actWriteAt() {
+        ask("Tulis @offset", "nama partisi (mis. miscdata)", "miscdata", name -> {
+            if (name.isEmpty()) return;
+            ask("Offset", "offset byte (hex/desimal)", "0", offs ->
+                    ask("Data", "byte hex, mis. 01 02 FF", "00", hexs -> {
+                        long off;
+                        byte[] data;
+                        try {
+                            off = parseNum(offs);
+                            data = parseHex(hexs);
+                        } catch (Exception e) {
+                            toast("offset/data tidak valid");
+                            return;
+                        }
+                        if (data.length == 0) {
+                            toast("data kosong");
+                            return;
+                        }
+                        runOp("Tulis " + name + " @0x" + Long.toHexString(off), x -> {
+                            x.setWorkDir(dumpDir());
+                            x.writeAtOffset(name, off, data);
+                        }, false);
+                    }));
+        });
+    }
+
+    // ==================== UBL / exploit ====================
+
+    private void actUbl() {
+        confirm("Unlock bootloader?\nE_BL -> HUK -> AES-128-ECB -> miscdata@0x2000.\n"
+                        + "Perangkat akan reboot ke state unlocked.",
+                () -> runOp("UBL / Unlock Bootloader", x -> {
+                    String r = x.unlockBootloader();
+                    append("UBL: " + r);
+                }, false));
+    }
+
+    private void actCheckPwn() {
+        ask("Cek PWN", "slot trustos: 0 = trustos, 1 = trustos_a, 2 = trustos_b", "0", s -> {
+            final int ab;
+            try {
+                ab = Integer.parseInt(s.trim());
+            } catch (Exception e) {
+                toast("slot harus 0/1/2");
+                return;
+            }
+            runOp("e_checkpwn (ab=" + ab + ")", x -> append(x.checkPwn(ab)), false);
+        });
+    }
+
+    private void actPwn() {
+        ask("ePWN", "slot trustos: 0 = trustos, 1 = trustos_a, 2 = trustos_b", "0", s -> {
+            final int ab;
+            try {
+                ab = Integer.parseInt(s.trim());
+            } catch (Exception e) {
+                toast("slot harus 0/1/2");
+                return;
+            }
+            confirm("Jalankan e_pwn pada trustos slot " + ab + "?\n"
+                            + "Hanya jalan bila checkpwn melaporkan resp=7.",
+                    () -> runOp("e_pwn (ab=" + ab + ")", x -> append(x.doPwn(ab)), false));
+        });
+    }
+
+    private void actReadMem() {
+        ask("Baca Memori", "alamat (hex 0x.. atau desimal)", "0x40000000", addrs ->
+                ask("Panjang", "ukuran byte (hex/desimal)", "65536", lens -> {
+                    long addr, len;
+                    try {
+                        addr = parseNum(addrs);
+                        len = parseNum(lens);
+                    } catch (Exception e) {
+                        toast("alamat/panjang tidak valid");
+                        return;
+                    }
+                    if (len <= 0) {
+                        toast("panjang harus > 0");
+                        return;
+                    }
+                    runOp("e_readmem @0x" + Long.toHexString(addr), x -> {
+                        File dir = dumpDir();
+                        x.setWorkDir(dir);
+                        File out = new File(dir, "mem_" + Long.toHexString(addr) + ".bin");
+                        x.readMemory(addr, len, out);
+                        append("Selesai: " + out.getAbsolutePath()
+                                + " (" + PacParser.human(out.length()) + ")");
+                    }, false);
+                }));
+    }
+
+    // ==================== info tambahan ====================
+
+    private void actRpmb() {
+        runOp("RPMB Info", x -> {
+            append("RPMB page count: " + x.rpmbPageCount());
+            append("RPMB counter  : " + x.rpmbCounter());
+        }, false);
+    }
+
+    private void actCid() {
+        runOp("EMMC CID", x -> {
+            append("EMMC CID : " + x.emmcCid());
+            try {
+                append("Flash UID: " + x.flashUid());
+            } catch (Exception e) {
+                append("Flash UID: " + e.getMessage());
+            }
+        }, false);
+    }
+
+    private void actFlashUid() {
+        runOp("Flash UID", x -> append("Flash UID: " + x.flashUid()), false);
+    }
+
+    private void actPacTime() {
+        runOp("PACTIME", x -> {
+            long t = x.pactime();
+            long unix = t == 0 ? 0 : (t / 10000000L) - 11644473600L;
+            append("pactime = 0x" + Long.toHexString(t) + "  unix = " + unix
+                    + "  (" + (unix > 0 ? new java.util.Date(unix * 1000L).toString() : "kosong") + ")");
+        }, false);
+    }
+
+    private void actFirstMode() {
+        ask("First Mode", "mode id (desimal/hex, ditambah 0x53464D00)", "0", s -> {
+            final int mode;
+            try {
+                mode = (int) parseNum(s);
+            } catch (Exception e) {
+                toast("mode tidak valid");
+                return;
+            }
+            confirm("Tulis firstmode " + mode + " ke miscdata@0x2420?",
+                    () -> runOp("firstmode " + mode, x -> x.setFirstMode(mode), false));
+        });
+    }
+
+    private void actExportXml() {
+        ensureParts(() -> {
+            final java.util.List<ExtOps.Part> list = parts;
+            runOp("Export XML partisi", x -> {
+                File dir = dumpDir();
+                x.exportPartitionXml(list, new File(dir, "partition_list.xml"));
             }, false);
         });
     }

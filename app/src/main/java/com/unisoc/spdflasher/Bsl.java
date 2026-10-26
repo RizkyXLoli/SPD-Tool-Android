@@ -26,6 +26,21 @@ public class Bsl {
     public static final int CMD_READ_END = 0x12;
     public static final int CMD_READ_CHIP_UID = 0x1A;
     public static final int CMD_DISABLE_TRANSCODE = 0x21;
+    public static final int CMD_READ_FLASH_UID = 0x15;
+    public static final int CMD_SET_FIRST_MODE = 0x2A;
+    public static final int CMD_READ_PARTITION = 0x2D;
+    public static final int CMD_EMMC_CID = 0x43;
+
+    /* extended command FDL2 (spd_cmd.h: BSL_CMD_E_*) */
+    public static final int CMD_E_READ_MEM = 0x70;
+    public static final int CMD_E_BL = 0x71;
+    public static final int CMD_E_RPMB_PAGECOUNT = 0x73;
+    public static final int CMD_E_RPMB_COUNTER = 0x74;
+    public static final int CMD_E_RPMB_READ = 0x75;
+    public static final int CMD_E_RPMB_WRITE = 0x76;
+    public static final int CMD_E_EFUSE_READ = 0x78;
+    public static final int CMD_E_PWN = 0x79;
+    public static final int CMD_E_CHECKPWN = 0x7A;
 
     public static final int REP_ACK = 0x80;
     public static final int REP_BSL_VER = 0x81;
@@ -35,6 +50,15 @@ public class Bsl {
     public static final int REP_VERIFY_ERR = 0x8B;
     public static final int REP_READ_DATA = 0x93;
     public static final int REP_LAYOUT_MISMATCH = 0x96;
+    public static final int REP_READ_FLASH_UID = 0x9E;
+    public static final int REP_READ_PARTITION = 0xBA;
+    public static final int REP_EMMC_CID_DATA = 0xC0;
+    public static final int REP_E_READ_MEM = 0xE0;
+    public static final int REP_E_BL = 0xE1;
+    public static final int REP_E_RPMB_PAGECOUNT = 0xE3;
+    public static final int REP_E_RPMB_COUNTER = 0xE4;
+    public static final int REP_E_RPMB_READ = 0xE5;
+    public static final int REP_E_EFUSE_READ = 0xE8;
     public static final int REP_PART_NOT_FOUND = 0xFE;
 
     public static class Resp {
@@ -311,6 +335,15 @@ public class Bsl {
             case REP_VERIFY_ERR: return "VERIFY_ERROR";
             case REP_READ_DATA: return "READ_DATA";
             case REP_LAYOUT_MISMATCH: return "LAYOUT_MISMATCH(0x96)";
+            case REP_READ_FLASH_UID: return "READ_FLASH_UID(0x9E)";
+            case REP_READ_PARTITION: return "READ_PARTITION(0xBA)";
+            case REP_EMMC_CID_DATA: return "EMMC_CID(0xC0)";
+            case REP_E_READ_MEM: return "E_READ_MEM(0xE0)";
+            case REP_E_BL: return "E_BL(0xE1)";
+            case REP_E_RPMB_PAGECOUNT: return "E_RPMB_PAGECOUNT(0xE3)";
+            case REP_E_RPMB_COUNTER: return "E_RPMB_COUNTER(0xE4)";
+            case REP_E_RPMB_READ: return "E_RPMB_READ(0xE5)";
+            case REP_E_EFUSE_READ: return "E_EFUSE_READ(0xE8)";
             case REP_PART_NOT_FOUND: return "PART_NOT_FOUND(0xFE)";
             default: return String.format("0x%02X", t);
         }
