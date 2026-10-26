@@ -33,6 +33,8 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -61,6 +63,7 @@ public class SpreadtrumToolActivity extends Activity {
     private File pacFile;
     private String pendingPartition;
     private volatile boolean cancelOp;
+    private boolean usbReceiverRegistered;
 
     private TextView tvPac, tvLog, tvStage;
     private ProgressBar progress;
@@ -116,13 +119,43 @@ public class SpreadtrumToolActivity extends Activity {
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
-        usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
-        setContentView(buildUi());
-        registerReceiver(usbReceiver, new IntentFilter(UsbManager.ACTION_USB_DEVICE_DETACHED));
-        IntentFilter f = new IntentFilter("com.unisoc.spdflasher.USB_PERMISSION");
-        registerReceiver(usbReceiver, f);
-        append("Spreadtrum Service Tool siap.");
-        append("Pilih salah satu menu di atas — alat baru mulai mencari perangkat setelah menu dipilih.");
+        try {
+            usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
+            setContentView(buildUi());
+            registerUsbReceiver();
+            append("Spreadtrum Service Tool siap.");
+            append("Pilih salah satu menu di atas — alat baru mulai mencari perangkat setelah menu dipilih.");
+        } catch (Throwable t) {
+            showFatal(t);
+        }
+    }
+
+    private void registerUsbReceiver() {
+        IntentFilter f = new IntentFilter();
+        f.addAction(UsbManager.ACTION_USB_DEVICE_DETACHED);
+        f.addAction("com.unisoc.spdflasher.USB_PERMISSION");
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(usbReceiver, f, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(usbReceiver, f);
+        }
+        usbReceiverRegistered = true;
+    }
+
+    /** Jaring pengaman: jangan force close, tampilkan penyebabnya. */
+    private void showFatal(Throwable t) {
+        StringWriter sw = new StringWriter();
+        t.printStackTrace(new PrintWriter(sw));
+        TextView tv = new TextView(this);
+        tv.setText("Spreadtrum Service Tool gagal dibuka\n\n" + sw.toString());
+        tv.setTextColor(0xFFFF8A80);
+        tv.setTextSize(10);
+        tv.setTypeface(Typeface.MONOSPACE);
+        tv.setPadding(dp(12), dp(30), dp(12), dp(12));
+        ScrollView sv = new ScrollView(this);
+        sv.setBackgroundColor(0xFF0B0F14);
+        sv.addView(tv);
+        setContentView(sv);
     }
 
     @Override
@@ -285,7 +318,12 @@ public class SpreadtrumToolActivity extends Activity {
         return Math.round(getResources().getDisplayMetrics().density * v);
     }
 
-    private void append(String s) {
+    private void append(final String s) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            ui.post(() -> append(s));
+            return;
+        }
+        if (tvLog == null) return;
         String t = tvLog.getText().toString();
         if (t.length() > 12000) t = t.substring(t.length() - 8000);
         tvLog.setText(t + (t.isEmpty() ? "" : "\n") + s);
