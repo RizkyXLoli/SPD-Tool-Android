@@ -29,5 +29,11 @@
                 android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
                 android:resource="@xml/usb_device_filter" />
         </activity>
+
+        <activity
+            android:name=".SpreadtrumToolActivity"
+            android:exported="false"
+            android:label="Spreadtrum Service Tool"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
     </application>
 </manifest>

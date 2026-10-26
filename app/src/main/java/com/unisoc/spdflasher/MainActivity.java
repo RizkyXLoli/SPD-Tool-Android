@@ -88,14 +88,13 @@ public class MainActivity extends Activity {
                 UsbDevice d = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
                 if (Fastboot.isFastboot(d)) {
                     fbDevice = d;
-                    log("HP terpasang dalam mode fastboot.");
+                    log("HP terpasang dalam mode fastboot. Pilih menu fastboot untuk mulai.");
                     refreshDeviceLabel();
-                    if (!usbManager.hasPermission(d)) requestPerm(d);
                 } else if (UsbTransport.isUnisoc(d)) {
                     device = d;
-                    log("HP terpasang. Menunggu izin akses USB...");
+                    log("HP terpasang (mode download). Pilih menu untuk mulai — izin USB "
+                            + "diminta saat menu dijalankan.");
                     refreshDeviceLabel();
-                    requestPerm(d);
                 }
             } else if (UsbManager.ACTION_USB_DEVICE_DETACHED.equals(a)) {
                 UsbDevice d = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE);
@@ -124,9 +123,8 @@ public class MainActivity extends Activity {
         usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
         setContentView(buildUi());
         registerUsbReceiver();
-        log("Menunggu perangkat... Sambungkan HP Unisoc lewat OTG, lalu hidupkan "
-                + "sambil menekan tombol Volume (masuk mode download).");
-        scanDevices(true);
+        log("Pilih menu dulu. Alat baru mulai mencari perangkat setelah Anda menekan salah satu menu.");
+        refreshDeviceLabel();
     }
 
     @Override
@@ -201,6 +199,11 @@ public class MainActivity extends Activity {
                 btnFb = button("Menu Fastboot", v -> fastbootMenu())
         ));
         btnForceFb.setTextColor(0xFFFF7043);
+
+        Button btnSvc = button("Spreadtrum Service Tool  (lanjutan)", v ->
+                startActivity(new Intent(MainActivity.this, SpreadtrumToolActivity.class)));
+        btnSvc.setTextColor(0xFF7FD1FF);
+        root.addView(row(btnSvc));
 
         cbRepart = new CheckBox(this);
         cbRepart.setText("Izinkan repartition bila layout beda");
@@ -364,12 +367,46 @@ public class MainActivity extends Activity {
 
     private UsbTransport ensureTransport() throws IOException {
         if (transport != null) return transport;
-        if (device == null) scanDevices(true);
-        if (device == null) throw new IOException("HP belum tersambung. Sambungkan lewat OTG "
-                + "dan pastikan HP sudah masuk mode download.");
+        if (device == null) {
+            log("Menunggu perangkat... Sambungkan HP Unisoc lewat OTG, lalu hidupkan "
+                    + "sambil menekan tombol Volume (masuk mode download).");
+            long end = System.currentTimeMillis() + 60000;
+            while (device == null && System.currentTimeMillis() < end) {
+                UsbDevice d = UsbTransport.find(usbManager);
+                if (d != null) {
+                    device = d;
+                    log("Perangkat terdeteksi: PID 0x" + Integer.toHexString(d.getProductId())
+                            + ", " + UsbTransport.modeOf(d));
+                    refreshDeviceLabel();
+                    if (!usbManager.hasPermission(d)) requestPerm(d);
+                    break;
+                }
+                try {
+                    Thread.sleep(400);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Dibatalkan");
+                }
+            }
+        }
+        if (device == null) throw new IOException("Perangkat tidak terdeteksi dalam 60 detik. "
+                + "Sambungkan lewat OTG dan pastikan HP sudah masuk mode download.");
         if (!usbManager.hasPermission(device)) {
             requestPerm(device);
-            throw new IOException("Menunggu izin USB — tekan izinkan lalu coba lagi.");
+            long end = System.currentTimeMillis() + 30000;
+            while (!usbManager.hasPermission(device) && System.currentTimeMillis() < end) {
+                try {
+                    Thread.sleep(300);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Dibatalkan");
+                }
+            }
+            if (!usbManager.hasPermission(device)) {
+                throw new IOException("Izin USB belum diberikan. Tekan \"Izinkan\" di HP, "
+                        + "lalu jalankan menu lagi.");
+            }
+            log("Izin USB diberikan.");
         }
         transport = UsbTransport.open(usbManager, device);
         return transport;
